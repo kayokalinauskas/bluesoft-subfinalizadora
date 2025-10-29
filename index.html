@@ -102,6 +102,29 @@
             <h2 class="text-2xl font-bold text-gray-800">Como usar</h2>
           </div>
 
+          <div class="mb-8 bg-blue-50 border border-blue-200 rounded-xl p-6">
+            <h3 class="text-xl font-semibold text-gray-800 mb-3">Permissão necessária</h3>
+            <p class="text-gray-700 mb-3">
+              Verifique se o seu usuário no ERP possui a permissão abaixo antes de usar a integração:
+            </p>
+            <div
+              class="bg-white border-l-4 border-blue-500 p-4 rounded-lg shadow-sm text-gray-800 font-medium flex items-center gap-2"
+            >
+              <i class="fas fa-key text-blue-500"></i>
+              <span>4302 - API Mapa de Subfinalizadora (Incluir)</span>
+            </div>
+
+            <h3 class="text-xl font-semibold text-gray-800 mt-6 mb-3">Gerando o token de acesso</h3>
+            <p class="text-gray-700 mb-2">Siga estes passos para gerar o token e usá-lo no campo de autenticação:</p>
+            <ol class="list-decimal pl-6 space-y-2 text-gray-700">
+              <li>Faça login no ERP Bluesoft com seu usuário.</li>
+              <li>Clique no seu nome (canto superior direito) e selecione <strong>Editar Perfil</strong>.</li>
+              <li>Role a página até o final e clique em <strong>Gerar token</strong>.</li>
+              <li>Copie o token gerado.</li>
+              <li>Cole o token no campo <strong>Token</strong> na seção <em>Configurações</em> acima.</li>
+            </ol>
+          </div>
+
           <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div>
               <h3 class="text-xl font-semibold text-gray-800 mb-4">Upload de Arquivo</h3>
