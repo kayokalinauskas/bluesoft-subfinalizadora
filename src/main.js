@@ -1,7 +1,7 @@
 // Configurações e constantes
 const CONFIG = {
   PROXY_URL: "https://nodejs-serverless-function-express-blue-seven-39.vercel.app/api/proxy",
-  MAX_HISTORY_ITEMS: 50,
+  MAX_HISTORY_ITEMS: 60,
   API_DELAY_MS: 100,
   PREVIEW_ROWS_LIMIT: 10,
   ALERT_DISPLAY_TIME: 3000,
