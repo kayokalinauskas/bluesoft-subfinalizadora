@@ -192,7 +192,7 @@ export class BluesoftIntegrationApp {
         cell.className = "px-3 py-3 whitespace-nowrap text-sm text-gray-800";
       }
 
-      cell.textContent = data[field] ?? "—";
+      cell.textContent = (data[field] !== null && data[field] !== undefined && data[field] !== "") ? data[field] : "—";
       row.appendChild(cell);
     });
 

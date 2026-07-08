@@ -3,7 +3,7 @@ export class DataValidator {
     const errors = [];
 
     if (!data.tipoTef || !["SITEF", "POS"].includes(data.tipoTef)) {
-      errors.push("Tipo TEF inválido. Deve ser 'SITEF' ou 'POS'");
+      errors.push("Tipo TEF inválido. Deve ser 1 (SITEF) ou 2 (POS)");
     }
 
     if (!data.codigoBandeira || isNaN(data.codigoBandeira) || data.codigoBandeira <= 0) {

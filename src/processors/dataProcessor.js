@@ -5,29 +5,33 @@ export class DataProcessor {
   static convertRowToJson(row) {
     const tipoTef = this.mapTipoTef(row.tipo_tef_key);
     const tipoCartao = this.mapTipoCartao(row.tipo_cartao);
+    const codigoBandeira = parseInt(row.codigo_bandeira, 10);
+    const subFinalizadoraKey = parseInt(row.sub_finalizadora_key, 10);
 
     return {
       tipoTef,
-      codigoBandeira: parseInt(row.codigo_bandeira, 10),
+      codigoBandeira: isNaN(codigoBandeira) ? null : codigoBandeira,
       tipoCartao,
       codigoAdministradora: String(row.codigo_autorizadora ?? row.codigo_administradora ?? ""),
-      subFinalizadoraKey: parseInt(row.sub_finalizadora_key, 10),
+      subFinalizadoraKey: isNaN(subFinalizadoraKey) ? null : subFinalizadoraKey,
     };
   }
 
   static mapTipoTef(tipoTefKey) {
     const mapping = { 1: "SITEF", 2: "POS" };
-    return mapping[tipoTefKey] || "POS";
+    return mapping[tipoTefKey] ?? null;
   }
 
   static mapTipoCartao(tipoCartao) {
-    if (!tipoCartao) return "CARTAO_DEBITO";
+    if (!tipoCartao) return null;
 
     const tipo = tipoCartao.toLowerCase();
     const mapping = {
       parcelado: "CARTAO_PARCELADO",
       crédito: "CARTAO_CREDITO",
       credito: "CARTAO_CREDITO",
+      debito: "CARTAO_DEBITO",
+      débito: "CARTAO_DEBITO",
       voucher: "CARTAO_VOUCHER",
     };
 
@@ -35,7 +39,7 @@ export class DataProcessor {
       if (tipo.includes(key)) return value;
     }
 
-    return "CARTAO_DEBITO";
+    return null;
   }
 
   static async processFile(file, hasHeader) {
