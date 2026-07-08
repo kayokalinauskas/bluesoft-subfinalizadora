@@ -9,9 +9,6 @@
   --color-info: #06b6d4;
 }
 
-.hidden {
-  display: none;
-}
 .fade-in {
   animation: fadeIn 0.3s ease-in-out;
 }

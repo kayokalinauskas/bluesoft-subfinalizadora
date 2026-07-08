@@ -30,6 +30,12 @@ const DOM_ELEMENTS = {
   historyList: document.getElementById("historyList"),
   clearHistoryBtn: document.getElementById("clearHistory"),
   tabButtons: document.querySelectorAll(".tab-button"),
+  tabContents: document.querySelectorAll(".tab-content"),
+  manualTipoTef: document.getElementById("tipoTef"),
+  manualCodigoBandeira: document.getElementById("codigoBandeira"),
+  manualTipoCartao: document.getElementById("tipoCartao"),
+  manualCodigoAdministradora: document.getElementById("codigoAdministradora"),
+  manualSubFinalizadoraKey: document.getElementById("subFinalizadoraKey"),
 };
 
 // Classes
@@ -62,17 +68,21 @@ class StorageManager {
 }
 
 class AlertManager {
+  static escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   static show(message, type = "info") {
     const typeConfig = {
       success: { bg: "bg-green-100", text: "text-green-800", border: "border-green-200", icon: "fa-check-circle" },
-      warning: {
-        bg: "bg-yellow-100",
-        text: "text-yellow-800",
-        border: "border-yellow-200",
-        icon: "fa-exclamation-triangle",
-      },
-      error: { bg: "bg-red-100", text: "text-red-800", border: "border-red-200", icon: "fa-exclamation-circle" },
-      info: { bg: "bg-blue-100", text: "text-blue-800", border: "border-blue-200", icon: "fa-info-circle" },
+      warning: { bg: "bg-yellow-100", text: "text-yellow-800", border: "border-yellow-200", icon: "fa-exclamation-triangle" },
+      error:   { bg: "bg-red-100",   text: "text-red-800",   border: "border-red-200",   icon: "fa-exclamation-circle" },
+      info:    { bg: "bg-blue-100",  text: "text-blue-800",  border: "border-blue-200",  icon: "fa-info-circle" },
     };
 
     const config = typeConfig[type] || typeConfig.info;
@@ -80,20 +90,16 @@ class AlertManager {
     const alertDiv = document.createElement("div");
     alertDiv.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 max-w-sm ${config.bg} ${config.text} ${config.border}`;
 
-    alertDiv.innerHTML = `
-      <div class="flex items-center">
-        <i class="fas ${config.icon} mr-2"></i>
-        <span>${message}</span>
-      </div>
-    `;
+    const inner = document.createElement("div");
+    inner.className = "flex items-center";
+    inner.innerHTML = `<i class="fas ${config.icon} mr-2"></i>`;
+    const span = document.createElement("span");
+    span.textContent = message;
+    inner.appendChild(span);
+    alertDiv.appendChild(inner);
 
     document.body.appendChild(alertDiv);
-
-    setTimeout(() => {
-      if (alertDiv.parentNode) {
-        alertDiv.parentNode.removeChild(alertDiv);
-      }
-    }, CONFIG.ALERT_DISPLAY_TIME);
+    setTimeout(() => alertDiv.remove(), CONFIG.ALERT_DISPLAY_TIME);
   }
 }
 
@@ -136,15 +142,15 @@ class DataProcessor {
 
     return {
       tipoTef,
-      codigoBandeira: parseInt(row.codigo_bandeira),
+      codigoBandeira: parseInt(row.codigo_bandeira, 10),
       tipoCartao,
-      codigoAdministradora: String(row.codigo_administradora),
-      subFinalizadoraKey: parseInt(row.sub_finalizadora_key),
+      codigoAdministradora: String(row.codigo_autorizadora ?? row.codigo_administradora ?? ""),
+      subFinalizadoraKey: parseInt(row.sub_finalizadora_key, 10),
     };
   }
 
   static mapTipoTef(tipoTefKey) {
-    const mapping = { 1: "SITEF", 1: "SITEF" };
+    const mapping = { 1: "SITEF", 2: "POS" };
     return mapping[tipoTefKey] || "POS";
   }
 
@@ -315,7 +321,6 @@ class AppState {
 class BluesoftIntegrationApp {
   constructor() {
     this.state = new AppState();
-    this.isProcessing = false;
   }
 
   init() {
@@ -360,11 +365,7 @@ class BluesoftIntegrationApp {
     activeButton.classList.remove("border-transparent", "text-gray-600");
     activeButton.classList.add("border-primary", "text-primary", "bg-blue-50");
 
-    // Atualizar conteúdo da aba
-    document.querySelectorAll(".tab-content").forEach((content) => {
-      content.classList.remove("active");
-    });
-
+    DOM_ELEMENTS.tabContents.forEach((content) => content.classList.remove("active"));
     document.getElementById(`${tabId}-tab`).classList.add("active");
   }
 
@@ -418,29 +419,32 @@ class BluesoftIntegrationApp {
       return;
     }
 
-    DOM_ELEMENTS.previewBody.innerHTML = "";
-    let validRows = 0;
-
-    for (let i = 0; i < Math.min(this.state.fileData.length, CONFIG.PREVIEW_ROWS_LIMIT); i++) {
+    const totalRows = this.state.fileData.length;
+    this.state.fileData = this.state.fileData.filter((row) => {
       try {
-        const row = this.state.fileData[i];
         const jsonData = DataProcessor.convertRowToJson(row);
-        const validation = DataValidator.validateSubmissionData(jsonData);
-
-        if (!validation.isValid) continue;
-
-        const rowElement = this.createPreviewRow(jsonData);
-        DOM_ELEMENTS.previewBody.appendChild(rowElement);
-        validRows++;
-      } catch (error) {
-        console.warn(`Erro ao processar linha ${i}:`, error);
+        return DataValidator.validateSubmissionData(jsonData).isValid;
+      } catch {
+        return false;
       }
+    });
+
+    const skipped = totalRows - this.state.fileData.length;
+    if (skipped > 0) {
+      AlertManager.show(`${skipped} linha(s) inválida(s) removida(s) do arquivo.`, "warning");
     }
 
-    if (validRows === 0) {
+    if (this.state.fileData.length === 0) {
       AlertManager.show("Nenhuma linha válida encontrada no arquivo. Verifique as colunas necessárias.", "warning");
       DOM_ELEMENTS.filePreview.classList.add("hidden");
       return;
+    }
+
+    DOM_ELEMENTS.previewBody.innerHTML = "";
+
+    for (let i = 0; i < Math.min(this.state.fileData.length, CONFIG.PREVIEW_ROWS_LIMIT); i++) {
+      const jsonData = DataProcessor.convertRowToJson(this.state.fileData[i]);
+      DOM_ELEMENTS.previewBody.appendChild(this.createPreviewRow(jsonData));
     }
 
     this.addPreviewInfoRow();
@@ -502,16 +506,16 @@ class BluesoftIntegrationApp {
   }
 
   async processAllRows() {
+    const tenant = StorageManager.get("bluesoftTenant");
+    const token = StorageManager.get("bluesoftToken");
     let successCount = 0;
     let errorCount = 0;
 
     for (let i = 0; i < this.state.fileData.length; i++) {
-      if (this.isProcessing) break;
-
       this.updateProgress(i, this.state.fileData.length);
 
       try {
-        await this.processSingleRow(this.state.fileData[i]);
+        await this.processSingleRow(this.state.fileData[i], tenant, token);
         successCount++;
       } catch (error) {
         errorCount++;
@@ -530,16 +534,13 @@ class BluesoftIntegrationApp {
     DOM_ELEMENTS.progressText.textContent = `${progress}% (${currentIndex + 1}/${total})`;
   }
 
-  async processSingleRow(row) {
+  async processSingleRow(row, tenant, token) {
     const jsonData = DataProcessor.convertRowToJson(row);
     const validation = DataValidator.validateSubmissionData(jsonData);
 
     if (!validation.isValid) {
       throw new Error(validation.errors[0]);
     }
-
-    const tenant = StorageManager.get("bluesoftTenant");
-    const token = StorageManager.get("bluesoftToken");
 
     try {
       await ApiService.sendData(tenant, token, jsonData);
@@ -573,6 +574,7 @@ class BluesoftIntegrationApp {
 
     this.renderResultsTable();
     this.addResultsSummary(successCount, errorCount);
+    this.renderHistory();
   }
 
   renderResultsTable() {
@@ -624,15 +626,15 @@ class BluesoftIntegrationApp {
   }
 
   generateReportCSV() {
-    let csvContent = "Subfinalizadora,Status,Mensagem\n";
+    const rows = ["Subfinalizadora,Status,Mensagem"];
 
     this.state.processingResults.forEach((result) => {
       const status = result.status === "success" ? "Sucesso" : "Erro";
       const message = result.message.replace(/"/g, '""');
-      csvContent += `${result.subFinalizadoraKey},${status},"${message}"\n`;
+      rows.push(`${result.subFinalizadoraKey},${status},"${message}"`);
     });
 
-    return csvContent;
+    return rows.join("\n");
   }
 
   downloadCSV(content, filename) {
@@ -645,6 +647,7 @@ class BluesoftIntegrationApp {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   async handleManualSubmit(event) {
@@ -665,11 +668,11 @@ class BluesoftIntegrationApp {
 
   collectManualFormData() {
     return {
-      tipoTef: document.getElementById("tipoTef").value,
-      codigoBandeira: parseInt(document.getElementById("codigoBandeira").value),
-      tipoCartao: document.getElementById("tipoCartao").value,
-      codigoAdministradora: document.getElementById("codigoAdministradora").value,
-      subFinalizadoraKey: parseInt(document.getElementById("subFinalizadoraKey").value),
+      tipoTef: DOM_ELEMENTS.manualTipoTef.value,
+      codigoBandeira: parseInt(DOM_ELEMENTS.manualCodigoBandeira.value, 10),
+      tipoCartao: DOM_ELEMENTS.manualTipoCartao.value,
+      codigoAdministradora: DOM_ELEMENTS.manualCodigoAdministradora.value,
+      subFinalizadoraKey: parseInt(DOM_ELEMENTS.manualSubFinalizadoraKey.value, 10),
     };
   }
 
@@ -685,6 +688,8 @@ class BluesoftIntegrationApp {
     } catch (error) {
       this.showManualResult(`Erro ao enviar: ${error.message}`, false);
       this.state.addHistoryItem("Manual", formData, false, error.message);
+    } finally {
+      this.renderHistory();
     }
   }
 
@@ -694,8 +699,11 @@ class BluesoftIntegrationApp {
     const bgClass = isSuccess ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800";
     const icon = isSuccess ? "fa-check-circle" : "fa-exclamation-triangle";
 
-    DOM_ELEMENTS.manualResultMessage.className = `${bgClass} p-4 rounded-lg`;
-    DOM_ELEMENTS.manualResultMessage.innerHTML = `<i class="fas ${icon} mr-2"></i> ${message}`;
+    DOM_ELEMENTS.manualResultMessage.className = `${bgClass} p-4 rounded-lg flex items-center`;
+    DOM_ELEMENTS.manualResultMessage.innerHTML = `<i class="fas ${icon} mr-2"></i>`;
+    const span = document.createElement("span");
+    span.textContent = message;
+    DOM_ELEMENTS.manualResultMessage.appendChild(span);
   }
 
   renderHistory() {
@@ -713,6 +721,9 @@ class BluesoftIntegrationApp {
     const statusClass = item.success ? "border-l-green-500 bg-green-50" : "border-l-red-500 bg-red-50";
     const statusIcon = item.success ? "fa-check-circle text-green-500" : "fa-times-circle text-red-500";
     const statusText = item.success ? "Sucesso" : "Falha";
+    const messageLine = item.message
+      ? `<p class="text-sm text-gray-600 mt-1"><span class="font-medium">Mensagem:</span> ${AlertManager.escapeHtml(item.message)}</p>`
+      : "";
 
     return `
       <div class="history-item border-l-4 ${statusClass} p-4 mb-4 rounded-r-lg">
@@ -722,15 +733,9 @@ class BluesoftIntegrationApp {
             <i class="fas ${statusIcon} mr-1"></i> ${statusText}
           </span>
         </div>
-        <p class="text-sm text-gray-600 mt-1"><span class="font-medium">Tipo:</span> ${item.type}</p>
-        <p class="text-sm text-gray-600"><span class="font-medium">Subfinalizadora:</span> ${
-          item.data.subFinalizadoraKey
-        }</p>
-        ${
-          item.message
-            ? `<p class="text-sm text-gray-600 mt-1"><span class="font-medium">Mensagem:</span> ${item.message}</p>`
-            : ""
-        }
+        <p class="text-sm text-gray-600 mt-1"><span class="font-medium">Tipo:</span> ${AlertManager.escapeHtml(item.type)}</p>
+        <p class="text-sm text-gray-600"><span class="font-medium">Subfinalizadora:</span> ${AlertManager.escapeHtml(String(item.data.subFinalizadoraKey))}</p>
+        ${messageLine}
       </div>
     `;
   }
