@@ -2,18 +2,22 @@ import Papa from "papaparse";
 import ExcelWorker from "../workers/excel.worker.js?worker";
 
 export class DataProcessor {
+  static parseStrictInt(value) {
+    if (value === null || value === undefined) return null;
+    const s = String(value).trim();
+    return /^\d+$/.test(s) ? parseInt(s, 10) : null;
+  }
+
   static convertRowToJson(row) {
     const tipoTef = this.mapTipoTef(row.tipo_tef_key);
     const tipoCartao = this.mapTipoCartao(row.tipo_cartao);
-    const codigoBandeira = parseInt(row.codigo_bandeira, 10);
-    const subFinalizadoraKey = parseInt(row.sub_finalizadora_key, 10);
 
     return {
       tipoTef,
-      codigoBandeira: isNaN(codigoBandeira) ? null : codigoBandeira,
+      codigoBandeira: this.parseStrictInt(row.codigo_bandeira),
       tipoCartao,
       codigoAdministradora: String(row.codigo_autorizadora ?? row.codigo_administradora ?? ""),
-      subFinalizadoraKey: isNaN(subFinalizadoraKey) ? null : subFinalizadoraKey,
+      subFinalizadoraKey: this.parseStrictInt(row.sub_finalizadora_key),
     };
   }
 
