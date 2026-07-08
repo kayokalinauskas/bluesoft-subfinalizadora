@@ -159,10 +159,10 @@ class DataProcessor {
 
     const tipo = tipoCartao.toLowerCase();
     const mapping = {
+      parcelado: "CARTAO_PARCELADO",
       crédito: "CARTAO_CREDITO",
       credito: "CARTAO_CREDITO",
       voucher: "CARTAO_VOUCHER",
-      parcelado: "CARTAO_PARCELADO",
     };
 
     for (const [key, value] of Object.entries(mapping)) {
@@ -182,53 +182,77 @@ class DataProcessor {
 
   static processCSV(file, hasHeader) {
     return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-
-      reader.onload = (e) => {
-        try {
-          const results = Papa.parse(e.target.result, {
-            header: hasHeader,
-            skipEmptyLines: true,
-            dynamicTyping: false,
-            encoding: "UTF-8",
-          });
-
+      Papa.parse(file, {
+        worker: true,
+        header: hasHeader,
+        skipEmptyLines: true,
+        dynamicTyping: false,
+        encoding: "UTF-8",
+        complete: (results) => {
           if (results.errors.length > 0) {
             reject(new Error(`Erros no parsing do CSV: ${results.errors.map((e) => e.message).join(", ")}`));
             return;
           }
-
           resolve(results.data);
-        } catch (error) {
-          reject(new Error(`Falha ao processar CSV: ${error.message}`));
-        }
-      };
-
-      reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
-      reader.readAsText(file, "UTF-8");
+        },
+        error: (err) => reject(new Error(`Falha ao processar CSV: ${err.message}`)),
+      });
     });
   }
 
   static processExcel(file) {
     return new Promise((resolve, reject) => {
+      const workerCode = `
+        importScripts('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+        self.onmessage = function(e) {
+          try {
+            const workbook = XLSX.read(new Uint8Array(e.data), {
+              type: 'array',
+              cellDates: false,
+              cellNF: false,
+              cellHTML: false,
+              cellStyles: false,
+              dense: true
+            });
+            const sheetName = workbook.SheetNames[0];
+            const jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+            self.postMessage({ ok: true, data: jsonData });
+          } catch (err) {
+            self.postMessage({ ok: false, error: err.message });
+          }
+        };
+      `;
+
+      const workerBlob = new Blob([workerCode], { type: "application/javascript" });
+      const workerUrl = URL.createObjectURL(workerBlob);
+      const worker = new Worker(workerUrl);
+
       const reader = new FileReader();
-
       reader.onload = (e) => {
-        try {
-          const data = new Uint8Array(e.target.result);
-          const workbook = XLSX.read(data, { type: "array" });
-          const firstSheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[firstSheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet);
+        worker.postMessage(e.target.result, [e.target.result]);
+      };
+      reader.onerror = () => {
+        worker.terminate();
+        URL.revokeObjectURL(workerUrl);
+        reject(new Error("Falha ao ler arquivo"));
+      };
+      reader.readAsArrayBuffer(file);
 
-          resolve(jsonData);
-        } catch (error) {
-          reject(new Error(`Falha ao processar Excel: ${error.message}`));
+      worker.onmessage = (e) => {
+        URL.revokeObjectURL(workerUrl);
+        worker.terminate();
+        if (e.data.ok) {
+          resolve(e.data.data);
+        } else {
+          reject(new Error(`Falha ao processar Excel: ${e.data.error}`));
         }
       };
 
-      reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
-      reader.readAsArrayBuffer(file);
+      worker.onerror = (e) => {
+        URL.revokeObjectURL(workerUrl);
+        worker.terminate();
+        reject(new Error(`Falha ao processar Excel: ${e.message}`));
+      };
     });
   }
 }
@@ -404,32 +428,51 @@ class BluesoftIntegrationApp {
     // Mostrar/ocultar opções de CSV
     DOM_ELEMENTS.csvOptions.classList.toggle("hidden", !file.name.endsWith(".csv") && file.type !== "text/csv");
 
+    // Exibir estado de carregamento
+    DOM_ELEMENTS.fileInput.disabled = true;
+    DOM_ELEMENTS.filePreview.classList.remove("hidden");
+    DOM_ELEMENTS.previewBody.innerHTML =
+      '<tr><td colspan="5" class="px-6 py-8 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Processando arquivo...</td></tr>';
+
     try {
       this.state.fileData = await DataProcessor.processFile(file, DOM_ELEMENTS.hasHeader.checked);
-      this.showFilePreview();
+      await this.showFilePreview();
     } catch (error) {
       console.error("Erro no upload:", error);
       AlertManager.show(`Erro ao processar arquivo: ${error.message}`, "warning");
+      DOM_ELEMENTS.filePreview.classList.add("hidden");
+    } finally {
+      DOM_ELEMENTS.fileInput.disabled = false;
     }
   }
 
-  showFilePreview() {
+  async showFilePreview() {
     if (this.state.fileData.length === 0) {
       AlertManager.show("O arquivo não contém dados válidos.", "warning");
+      DOM_ELEMENTS.filePreview.classList.add("hidden");
       return;
     }
 
+    // Validar linhas em chunks para não bloquear a main thread
     const totalRows = this.state.fileData.length;
-    this.state.fileData = this.state.fileData.filter((row) => {
-      try {
-        const jsonData = DataProcessor.convertRowToJson(row);
-        return DataValidator.validateSubmissionData(jsonData).isValid;
-      } catch {
-        return false;
-      }
-    });
+    const validRows = [];
+    const CHUNK = 500;
 
-    const skipped = totalRows - this.state.fileData.length;
+    for (let i = 0; i < totalRows; i += CHUNK) {
+      const chunk = this.state.fileData.slice(i, i + CHUNK);
+      for (const row of chunk) {
+        try {
+          const jsonData = DataProcessor.convertRowToJson(row);
+          if (DataValidator.validateSubmissionData(jsonData).isValid) validRows.push(row);
+        } catch {
+          // linha inválida, ignorar
+        }
+      }
+      if (i + CHUNK < totalRows) await new Promise((r) => setTimeout(r, 0));
+    }
+
+    this.state.fileData = validRows;
+    const skipped = totalRows - validRows.length;
     if (skipped > 0) {
       AlertManager.show(`${skipped} linha(s) inválida(s) removida(s) do arquivo.`, "warning");
     }
