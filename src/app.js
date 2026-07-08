@@ -116,69 +116,147 @@ export class BluesoftIntegrationApp {
       return;
     }
 
-    const totalRows = this.state.fileData.length;
-    const validRows = [];
+    const allRows = this.state.fileData;
     const CHUNK = 500;
+    const tableRows = [];
 
-    for (let i = 0; i < totalRows; i += CHUNK) {
-      const chunk = this.state.fileData.slice(i, i + CHUNK);
-      for (const row of chunk) {
-        try {
-          const jsonData = DataProcessor.convertRowToJson(row);
-          if (DataValidator.validateSubmissionData(jsonData).isValid) validRows.push(row);
-        } catch {
-          // linha inválida, ignorar
-        }
+    for (let i = 0; i < allRows.length; i += CHUNK) {
+      const chunk = allRows.slice(i, i + CHUNK);
+      for (const originalRow of chunk) {
+        const jsonData = DataProcessor.convertRowToJson(originalRow);
+        const validation = DataValidator.validateSubmissionData(jsonData);
+        tableRows.push({ jsonData, isValid: validation.isValid, errors: validation.errors, originalRow });
       }
-      if (i + CHUNK < totalRows) await new Promise((r) => setTimeout(r, 0));
+      if (i + CHUNK < allRows.length) await new Promise((r) => setTimeout(r, 0));
     }
 
-    this.state.fileData = validRows;
-    const skipped = totalRows - validRows.length;
-    if (skipped > 0) {
-      AlertManager.show(`${skipped} linha(s) inválida(s) removida(s) do arquivo.`, "warning");
-    }
+    const validCount = tableRows.filter((r) => r.isValid).length;
+    const errorCount = tableRows.length - validCount;
 
-    if (this.state.fileData.length === 0) {
+    // Apenas linhas válidas são enviadas à API
+    this.state.fileData = tableRows.filter((r) => r.isValid).map((r) => r.originalRow);
+
+    if (validCount === 0) {
       AlertManager.show("Nenhuma linha válida encontrada no arquivo. Verifique as colunas necessárias.", "warning");
       DOM_ELEMENTS.filePreview.classList.add("hidden");
       return;
     }
 
+    DOM_ELEMENTS.previewSummary.innerHTML =
+      `<span class="px-2 py-1 rounded-full bg-green-100 text-green-700 text-xs font-medium"><i class="fas fa-check mr-1"></i>${validCount} válida${validCount !== 1 ? "s" : ""}</span>` +
+      (errorCount > 0
+        ? `<span class="px-2 py-1 rounded-full bg-red-100 text-red-700 text-xs font-medium"><i class="fas fa-times mr-1"></i>${errorCount} com erro</span>`
+        : "") +
+      `<span class="px-2 py-1 rounded-full bg-gray-100 text-gray-600 text-xs font-medium">${tableRows.length} total</span>`;
+
     DOM_ELEMENTS.previewBody.innerHTML = "";
+    tableRows.forEach((item, idx) => {
+      DOM_ELEMENTS.previewBody.appendChild(
+        this.createPreviewRow(item.jsonData, idx + 1, item.isValid, item.errors)
+      );
+    });
 
-    for (let i = 0; i < Math.min(this.state.fileData.length, CONFIG.PREVIEW_ROWS_LIMIT); i++) {
-      const jsonData = DataProcessor.convertRowToJson(this.state.fileData[i]);
-      DOM_ELEMENTS.previewBody.appendChild(this.createPreviewRow(jsonData));
-    }
-
-    this.addPreviewInfoRow();
+    this.setupPreviewFilters();
+    this.updatePreviewFilterInfo(tableRows.length, tableRows.length);
     DOM_ELEMENTS.filePreview.classList.remove("hidden");
   }
 
-  createPreviewRow(data) {
-    const row = document.createElement("tr");
+  createPreviewRow(data, rowIndex, isValid, errors) {
+    const FIELD_ERROR_MAP = {
+      tipoTef: /tipo tef/i,
+      codigoBandeira: /bandeira/i,
+      tipoCartao: /tipo cart/i,
+      codigoAdministradora: /administradora/i,
+      subFinalizadoraKey: /subfinalizadora key/i,
+    };
 
-    ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"].forEach((field) => {
+    const fields = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
+
+    const row = document.createElement("tr");
+    row.dataset.valid = isValid ? "ok" : "erro";
+    row.className = isValid ? "hover:bg-gray-50" : "bg-red-50 hover:bg-red-100";
+
+    const numCell = document.createElement("td");
+    numCell.className = "px-3 py-3 text-xs text-gray-400 select-none w-10";
+    numCell.textContent = rowIndex;
+    row.appendChild(numCell);
+
+    fields.forEach((field) => {
       const cell = document.createElement("td");
-      cell.className = "px-6 py-4 whitespace-nowrap text-sm text-gray-800";
-      cell.textContent = data[field];
+      const matchingError = errors.find((e) => FIELD_ERROR_MAP[field]?.test(e));
+
+      if (matchingError) {
+        cell.className = "px-3 py-3 whitespace-nowrap text-sm text-red-700 font-medium";
+        cell.title = matchingError;
+      } else {
+        cell.className = "px-3 py-3 whitespace-nowrap text-sm text-gray-800";
+      }
+
+      cell.textContent = data[field] ?? "—";
       row.appendChild(cell);
     });
 
+    const statusCell = document.createElement("td");
+    statusCell.className = "px-3 py-3 whitespace-nowrap text-xs w-28";
+
+    if (isValid) {
+      statusCell.innerHTML = '<span class="px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">✓ OK</span>';
+    } else {
+      const tooltip = AlertManager.escapeHtml(errors.join(" | "));
+      statusCell.innerHTML = `<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium cursor-help" title="${tooltip}">✗ Erro</span>`;
+    }
+
+    row.appendChild(statusCell);
     return row;
   }
 
-  addPreviewInfoRow() {
-    if (this.state.fileData.length <= CONFIG.PREVIEW_ROWS_LIMIT) return;
+  setupPreviewFilters() {
+    document.querySelectorAll(".preview-filter").forEach((el) => {
+      const evt = el.tagName === "SELECT" ? "change" : "input";
+      el.addEventListener(evt, () => this.applyPreviewFilters());
+    });
+  }
 
-    const infoRow = document.createElement("tr");
-    const infoCell = document.createElement("td");
-    infoCell.colSpan = 5;
-    infoCell.className = "px-6 py-4 text-center text-sm text-gray-500";
-    infoCell.textContent = `... e mais ${this.state.fileData.length - CONFIG.PREVIEW_ROWS_LIMIT} linhas`;
-    infoRow.appendChild(infoCell);
-    DOM_ELEMENTS.previewBody.appendChild(infoRow);
+  applyPreviewFilters() {
+    const colFilters = {};
+    let statusFilter = "";
+
+    document.querySelectorAll(".preview-filter").forEach((el) => {
+      const col = el.dataset.col;
+      if (col === "status") {
+        statusFilter = el.value;
+      } else {
+        colFilters[parseInt(col)] = el.value.trim().toLowerCase();
+      }
+    });
+
+    const rows = DOM_ELEMENTS.previewBody.querySelectorAll("tr");
+    let visibleCount = 0;
+
+    rows.forEach((row) => {
+      const cells = row.querySelectorAll("td");
+      let show = true;
+
+      if (statusFilter && row.dataset.valid !== statusFilter) show = false;
+
+      if (show) {
+        Object.entries(colFilters).forEach(([colIdx, val]) => {
+          if (!val) return;
+          const cell = cells[parseInt(colIdx)];
+          if (cell && !cell.textContent.toLowerCase().includes(val)) show = false;
+        });
+      }
+
+      row.style.display = show ? "" : "none";
+      if (show) visibleCount++;
+    });
+
+    this.updatePreviewFilterInfo(visibleCount, rows.length);
+  }
+
+  updatePreviewFilterInfo(visible, total) {
+    DOM_ELEMENTS.previewFilterInfo.textContent =
+      visible === total ? `${total} linha${total !== 1 ? "s" : ""}` : `${visible} de ${total} linhas`;
   }
 
   async processFileData() {

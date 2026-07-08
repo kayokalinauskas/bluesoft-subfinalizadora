@@ -6,7 +6,6 @@ export const CONFIG = {
   PROXY_URL: import.meta.env.VITE_PROXY_URL,
   MAX_HISTORY_ITEMS: 60,
   API_DELAY_MS: 100,
-  PREVIEW_ROWS_LIMIT: 10,
   ALERT_DISPLAY_TIME: 3000,
 };
 
@@ -20,6 +19,8 @@ export const DOM_ELEMENTS = {
   hasHeader: document.getElementById("hasHeader"),
   filePreview: document.getElementById("filePreview"),
   previewBody: document.getElementById("previewBody"),
+  previewSummary: document.getElementById("previewSummary"),
+  previewFilterInfo: document.getElementById("previewFilterInfo"),
   processFileBtn: document.getElementById("processFile"),
   processingSection: document.getElementById("processingSection"),
   progressBar: document.getElementById("progressBar"),
