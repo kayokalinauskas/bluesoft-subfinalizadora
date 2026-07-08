@@ -6,50 +6,113 @@ Single-page application (SPA) in vanilla JavaScript for sending "mapa de subfina
 
 **This is the frontend-only repository.** The CORS proxy lives in a separate GitHub repo. Do not add backend logic here — `ApiService` calls the proxy URL in `CONFIG.PROXY_URL` and that is the only coupling between the two repos.
 
+---
+
 ## Build & Dev
 
 ```bash
-npm run dev       # Vite dev server
+npm run dev       # Vite dev server (http://localhost:5173/bluesoft-subfinalizadora/)
 npm run build     # Production build (outputs to dist/)
 npm run preview   # Preview the production build locally
 ```
 
 Base path for GitHub Pages: `/bluesoft-subfinalizadora/` (set in `vite.config.js`).
 
-## Architecture
+### Environment variables
 
-All application code lives in two files: `index.html` and `src/main.js`.
+All configuration that varies per environment lives in `.env`:
 
-### Class responsibilities (`src/main.js`)
+```
+VITE_PROXY_URL=https://...vercel.app/api/proxy
+```
 
-| Class | Responsibility |
-|---|---|
-| `StorageManager` | `localStorage` read/write/remove wrapper |
-| `AlertManager` | Creates and auto-dismisses toast notifications; `escapeHtml(str)` for sanitizing user-controlled strings in HTML |
-| `DataValidator` | Validates the API payload shape before sending |
-| `DataProcessor` | Parses CSV (via PapaParse) and Excel (via SheetJS/XLSX) into row arrays, and maps row fields to API payload |
-| `ApiService` | POSTs to the Vercel proxy, which forwards to the Bluesoft ERP endpoint |
-| `AppState` | In-memory state (`fileData`, `processingResults`, `history`), persists history to localStorage |
-| `BluesoftIntegrationApp` | Main controller: mounts event listeners, tab switching, UI orchestration |
+`import.meta.env.VITE_PROXY_URL` is read in `src/config.js`. If the variable is missing, a `console.warn` fires at startup. Never put secrets in `.env` — Vite embeds `VITE_*` vars in the client bundle.
 
-### Constants
+---
 
-- `CONFIG` — top-level object for all magic numbers/URLs (proxy URL, delays, limits, display times)
-- `DOM_ELEMENTS` — top-level object caching all `getElementById` / `querySelectorAll` results
+## Module Structure
 
-**Always update `CONFIG` or `DOM_ELEMENTS` rather than adding inline `document.getElementById` calls.**
+```
+src/
+  main.js                     — Entry point: DOMContentLoaded → new BluesoftIntegrationApp().init()
+  config.js                   — CONFIG constants + DOM_ELEMENTS cache (both exported)
+  app.js                      — BluesoftIntegrationApp: event wiring, UI orchestration
+  state.js                    — AppState: in-memory state + localStorage persistence
+  style.css                   — Custom Tailwind @theme tokens
+  workers/
+    excel.worker.js           — Web Worker (Vite-bundled via ?worker import)
+  services/
+    api.js                    — ApiService: POSTs to proxy
+    storage.js                — StorageManager: localStorage wrapper
+  processors/
+    dataProcessor.js          — DataProcessor: CSV/Excel parsing + row→payload mapping
+    validator.js              — DataValidator: validates API payload shape
+  ui/
+    alerts.js                 — AlertManager: toast notifications + escapeHtml
+```
+
+### Module responsibilities
+
+| Module | Class | Responsibility |
+|---|---|---|
+| `config.js` | — | `CONFIG` (constants/URLs) and `DOM_ELEMENTS` (cached selectors). **All** magic numbers and DOM refs live here. |
+| `app.js` | `BluesoftIntegrationApp` | Mounts all event listeners, tab switching, UI orchestration. Coordinates the other classes. |
+| `state.js` | `AppState` | Owns `fileData`, `processingResults`, `history`. Persists history to localStorage. |
+| `services/api.js` | `ApiService` | `sendData(tenant, token, data)` — POSTs to the Vercel proxy. |
+| `services/storage.js` | `StorageManager` | `get/set/remove` localStorage wrapper with try/catch. |
+| `processors/dataProcessor.js` | `DataProcessor` | Parses CSV (`PapaParse worker:true`) and Excel (Vite Web Worker). Maps row fields → API payload via `convertRowToJson`. |
+| `processors/validator.js` | `DataValidator` | `validateSubmissionData(data)` — validates the API payload before sending. |
+| `ui/alerts.js` | `AlertManager` | `show(message, type)` — auto-dismissing toasts. `escapeHtml(str)` — always use this before injecting user-controlled strings into innerHTML. |
+| `workers/excel.worker.js` | — | Runs XLSX parsing off the main thread. Imported as `import ExcelWorker from '...?worker'` in `dataProcessor.js`. |
+
+---
+
+## Key Conventions
+
+### CONFIG and DOM_ELEMENTS
+
+Both are exported from `src/config.js` and populated at module initialization time. This is safe because `type="module"` scripts are deferred — the DOM is fully parsed before any module executes.
+
+```js
+// ALWAYS import from config.js — never use document.getElementById inline
+import { CONFIG, DOM_ELEMENTS } from './config.js';
+```
+
+- **New constant** (URL, timeout, limit) → add to `CONFIG` in `src/config.js`
+- **New DOM element** → add to `DOM_ELEMENTS` in `src/config.js` before referencing it
 
 ### API proxy
 
-Proxy URL is `CONFIG.PROXY_URL`. The proxy appends the real Bluesoft target URL as a query parameter (`?url=`). Authentication uses the `X-Customtoken` header.
+`CONFIG.PROXY_URL` receives the real ERP URL as `?url=<encoded>`. Authentication via `X-Customtoken` header. The proxy lives in a separate Vercel repo — notify its owner if the allowed origin changes.
 
-## UI Conventions
+### UI language and styling
 
-- Language: **Portuguese** for all UI labels, messages, and code comments
-- Styling: **Tailwind CSS v4** applied directly as utility classes in `index.html`; no separate component CSS except `src/style.css`
-- Custom color tokens defined in `src/style.css` under `@theme`: `--color-primary`, `--color-secondary`, `--color-success`, `--color-danger`, `--color-warning`, `--color-info`
-- Icons: **Font Awesome 6** via CDN (class prefix `fas fa-*`)
-- Tab system: buttons have `data-tab` attribute; content `<div>`s have `id="{tabId}-tab"`; active state toggled via `.active` class and `border-primary` / `bg-blue-50` CSS classes
+- All labels, messages, and code comments: **Portuguese**
+- Styling: **Tailwind CSS v4** utility classes in `index.html`; no component CSS except `src/style.css`
+- Custom color tokens in `src/style.css` under `@theme`: `--color-primary`, `--color-secondary`, `--color-success`, `--color-danger`, `--color-warning`, `--color-info`
+- Icons: **Font Awesome 6** via CDN (`fas fa-*`)
+
+### File parsing (performance)
+
+- **Excel**: parsed in a dedicated Vite Web Worker (`excel.worker.js`). Worker has a 60-second timeout with a `settle` guard (Promise resolves/rejects exactly once). XLSX flags `cellDates/cellNF/cellHTML/cellStyles: false` + `dense: true` for speed.
+- **CSV**: parsed by PapaParse with `worker: true` (PapaParse's internal worker).
+- Neither parser blocks the main thread.
+
+### Button guard pattern
+
+`processFileBtn` is disabled during:
+1. File loading (`handleFileUpload`) — re-enabled in `finally`
+2. API processing (`showProcessingUI`) — re-enabled in `showResults`
+
+This prevents double-fire. Follow the same pattern for any new async action tied to a button.
+
+### Security
+
+- Always use `AlertManager.escapeHtml()` when interpolating user-controlled or API-returned strings into `innerHTML` templates. Plain `.textContent` is always safe — prefer it for simple nodes.
+- The token is stored in `localStorage` in plain text — acceptable for this tool's threat model, but **never log it**.
+- `window.app` is only exposed when `import.meta.env.DEV` is true.
+
+---
 
 ## API Payload Shape
 
@@ -63,36 +126,73 @@ Proxy URL is `CONFIG.PROXY_URL`. The proxy appends the real Bluesoft target URL 
 }
 ```
 
-Validation logic lives in `DataValidator.validateSubmissionData()`.
+Validation: `DataValidator.validateSubmissionData()` in `src/processors/validator.js`.  
+Mapping: `DataProcessor.convertRowToJson()` in `src/processors/dataProcessor.js`.
 
-## File Format (CSV/Excel)
+---
+
+## File Format (CSV / Excel)
 
 Required columns (snake_case):
 
 | Column | Type | Notes |
 |---|---|---|
 | `sub_finalizadora_key` | INTEGER | |
-| `codigo_autorizadora` ou `codigo_administradora` | STRING | Aceita ambos os nomes; `codigo_autorizadora` tem prioridade |
+| `codigo_autorizadora` ou `codigo_administradora` | STRING | Aceita ambos; `codigo_autorizadora` tem prioridade |
 | `codigo_bandeira` | INTEGER | |
 | `tipo_tef_key` | INTEGER | 1 = SITEF, 2 = POS |
-| `tipo_cartao` | STRING | "crédito", "credito", "voucher", "parcelado" → mapped; default = CARTAO_DEBITO |
+| `tipo_cartao` | STRING | Substring match (case-insensitive): "parcelado" → `CARTAO_PARCELADO` (checked first), "crédito"/"credito" → `CARTAO_CREDITO`, "voucher" → `CARTAO_VOUCHER`; default = `CARTAO_DEBITO` |
 
-## Watch Out For
-
-- The token is stored in `localStorage` in plain text — acceptable for this tool's threat model, but avoid logging it.
-- `window.app` is exposed globally for debugging; do not rely on it in production code.
-- Always use `AlertManager.escapeHtml()` when interpolating user-controlled or API-returned strings into innerHTML templates.
+---
 
 ## Adding New Features — Checklist
 
-- [ ] **New tab**: add `<button class="tab-button" data-tab="<name>">` in `<!-- Tabs Navigation -->`, add `<div class="tab-content hidden fade-in" id="<name>-tab">` content block, and register via the existing `setupTabs()` mechanism.
-- [ ] **New API field**: update `DataValidator.validateSubmissionData`, `DataProcessor.convertRowToJson`, and `ApiService.sendData` together.
-- [ ] **New DOM element**: add to `DOM_ELEMENTS` before referencing it anywhere.
-- [ ] **New constant** (URL, limit, timeout): add to `CONFIG`.
-- [ ] **Proxy origin change**: notify the backend repo owner to update `ALLOWED_ORIGINS` and redeploy to Vercel.
+### New tab
 
-## External Libraries (CDN, no npm install)
+1. Add `<button class="tab-button" data-tab="<name>">` inside `<!-- Tabs Navigation -->` in `index.html`
+2. Add `<div class="tab-content hidden fade-in" id="<name>-tab">` content block in `index.html`
+3. The existing `setupTabs()` in `app.js` picks it up automatically — no code change needed there
 
-- `xlsx@0.18.5` — Excel parsing (`XLSX` global)
-- `papaparse@5.4.1` — CSV parsing (`Papa` global)
-- `font-awesome@6.4.0` — Icons
+### New API field
+
+Touch these three files together:
+1. `src/processors/validator.js` — add validation rule in `validateSubmissionData`
+2. `src/processors/dataProcessor.js` — add mapping in `convertRowToJson`
+3. `src/services/api.js` — include in the request body in `sendData` (if the field isn't already part of the payload object)
+
+### New DOM element
+
+Add to `DOM_ELEMENTS` in `src/config.js`:
+```js
+myNewElement: document.getElementById("myNewElement"),
+```
+Then import `DOM_ELEMENTS` wherever you need it.
+
+### New npm package
+
+```bash
+npm install <package>
+```
+Import directly in the module that needs it. Do **not** use CDN `<script>` tags for new libraries — Vite handles bundling.
+
+### New async button action
+
+```js
+DOM_ELEMENTS.myBtn.disabled = true;
+try {
+  await doSomethingAsync();
+} finally {
+  DOM_ELEMENTS.myBtn.disabled = false;
+}
+```
+
+---
+
+## External Libraries
+
+| Library | How loaded | Used in |
+|---|---|---|
+| `xlsx@^0.18` | npm (bundled by Vite into `excel.worker` chunk) | `src/workers/excel.worker.js` |
+| `papaparse@^5.4` | npm (bundled into main chunk) | `src/processors/dataProcessor.js` |
+| Font Awesome 6 | CDN `<link>` in `index.html` | `index.html` (icons) |
+| Tailwind CSS v4 | npm via `@tailwindcss/vite` plugin | `index.html`, `src/style.css` |
