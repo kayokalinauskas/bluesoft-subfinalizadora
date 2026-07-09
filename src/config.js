@@ -25,6 +25,7 @@ export const DOM_ELEMENTS = {
   processingSection: document.getElementById("processingSection"),
   progressBar: document.getElementById("progressBar"),
   progressText: document.getElementById("progressText"),
+  cancelProcessingBtn: document.getElementById("cancelProcessing"),
   resultsSection: document.getElementById("resultsSection"),
   resultsBody: document.getElementById("resultsBody"),
   downloadReportBtn: document.getElementById("downloadReport"),

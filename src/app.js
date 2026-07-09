@@ -43,6 +43,12 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.downloadReportBtn.addEventListener("click", () => this.downloadReport());
     DOM_ELEMENTS.manualForm.addEventListener("submit", (e) => this.handleManualSubmit(e));
     DOM_ELEMENTS.clearHistoryBtn.addEventListener("click", () => this.clearHistory());
+    
+    DOM_ELEMENTS.cancelProcessingBtn.addEventListener("click", () => {
+      this.isCancelled = true;
+      DOM_ELEMENTS.cancelProcessingBtn.disabled = true;
+      DOM_ELEMENTS.cancelProcessingBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Cancelando...';
+    });
   }
 
   setupTabs() {
@@ -289,29 +295,59 @@ export class BluesoftIntegrationApp {
 
   showProcessingUI() {
     DOM_ELEMENTS.processingSection.classList.remove("hidden");
-    DOM_ELEMENTS.resultsSection.classList.add("hidden");
+    DOM_ELEMENTS.resultsSection.classList.remove("hidden");
+    DOM_ELEMENTS.resultsBody.innerHTML = "";
     DOM_ELEMENTS.processFileBtn.disabled = true;
+
+    // Reset botão cancelar
+    DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
+    DOM_ELEMENTS.cancelProcessingBtn.innerHTML = '<i class="fas fa-ban mr-2"></i> Cancelar Envio';
+    DOM_ELEMENTS.cancelProcessingBtn.classList.remove("hidden");
+
     this.state.processingResults = [];
   }
 
   async processAllRows() {
     const tenant = StorageManager.get("bluesoftTenant");
     const token = StorageManager.get("bluesoftToken");
+
+    this.isCancelled = false;
+    const total = this.state.fileData.length;
+    let processedCount = 0;
     let successCount = 0;
     let errorCount = 0;
 
-    for (let i = 0; i < this.state.fileData.length; i++) {
-      this.updateProgress(i, this.state.fileData.length);
+    let currentIndex = 0;
 
-      try {
-        await this.processSingleRow(this.state.fileData[i], tenant, token);
-        successCount++;
-      } catch {
-        errorCount++;
+    const worker = async () => {
+      while (currentIndex < total && !this.isCancelled) {
+        const index = currentIndex++;
+        const row = this.state.fileData[index];
+
+        try {
+          await this.processSingleRow(row, tenant, token);
+          successCount++;
+        } catch {
+          errorCount++;
+        }
+
+        processedCount++;
+        this.updateProgress(processedCount - 1, total);
+
+        if (CONFIG.API_DELAY_MS > 0) {
+          await this.delay(CONFIG.API_DELAY_MS);
+        }
       }
+    };
 
-      await this.delay(CONFIG.API_DELAY_MS);
+    // Pool de concorrência com limite de até 5 workers simultâneos
+    const CONCURRENCY = 5;
+    const workers = [];
+    for (let i = 0; i < Math.min(CONCURRENCY, total); i++) {
+      workers.push(worker());
     }
+
+    await Promise.all(workers);
 
     this.showResults(successCount, errorCount);
   }
@@ -325,26 +361,63 @@ export class BluesoftIntegrationApp {
 
   async processSingleRow(row, tenant, token) {
     const jsonData = DataProcessor.convertRowToJson(row);
+    let result;
 
     try {
       await ApiService.sendData(tenant, token, jsonData);
 
-      this.state.processingResults.push({
+      result = {
         subFinalizadoraKey: jsonData.subFinalizadoraKey,
         status: "success",
         message: "Enviado com sucesso",
-      });
+      };
 
       this.state.addHistoryItem("Arquivo", jsonData, true);
     } catch (error) {
-      this.state.processingResults.push({
+      result = {
         subFinalizadoraKey: jsonData.subFinalizadoraKey,
         status: "error",
         message: error.message,
-      });
+      };
 
       this.state.addHistoryItem("Arquivo", jsonData, false, error.message);
-      throw error;
+    }
+
+    this.state.processingResults.push(result);
+    this.appendRealtimeResultRow(result);
+
+    if (result.status === "error") {
+      throw new Error(result.message);
+    }
+  }
+
+  appendRealtimeResultRow(result) {
+    const row = document.createElement("tr");
+    row.className = result.status === "success" ? "hover:bg-green-50" : "bg-red-50 hover:bg-red-100";
+
+    const keyCell = document.createElement("td");
+    keyCell.className = "px-6 py-4 whitespace-nowrap text-sm text-gray-800";
+    keyCell.textContent = result.subFinalizadoraKey !== null && result.subFinalizadoraKey !== undefined ? result.subFinalizadoraKey : "—";
+    row.appendChild(keyCell);
+
+    const statusCell = document.createElement("td");
+    statusCell.className = `px-6 py-4 whitespace-nowrap text-sm font-medium ${
+      result.status === "success" ? "text-green-600" : "text-red-600"
+    }`;
+    statusCell.textContent = result.status === "success" ? "Sucesso" : "Erro";
+    row.appendChild(statusCell);
+
+    const messageCell = document.createElement("td");
+    messageCell.className = "px-6 py-4 text-sm text-gray-800";
+    messageCell.textContent = result.message;
+    row.appendChild(messageCell);
+
+    DOM_ELEMENTS.resultsBody.appendChild(row);
+
+    // Auto scroll para o container de resultados à medida que chegam
+    const scrollContainer = DOM_ELEMENTS.resultsBody.closest(".overflow-y-auto") || DOM_ELEMENTS.resultsBody.parentElement;
+    if (scrollContainer) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
   }
 
@@ -356,45 +429,36 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.processingSection.classList.add("hidden");
     DOM_ELEMENTS.resultsSection.classList.remove("hidden");
     DOM_ELEMENTS.processFileBtn.disabled = false;
+    DOM_ELEMENTS.cancelProcessingBtn.classList.add("hidden");
 
-    this.renderResultsTable();
     this.addResultsSummary(successCount, errorCount);
     this.renderHistory();
+
+    if (this.isCancelled) {
+      const skipped = this.state.fileData.length - (successCount + errorCount);
+      AlertManager.show(`Processamento interrompido. ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s).`, "warning");
+    } else {
+      AlertManager.show("Mapeamento concluído!", "success");
+    }
   }
 
   renderResultsTable() {
-    DOM_ELEMENTS.resultsBody.innerHTML = "";
-
-    this.state.processingResults.forEach((result) => {
-      const row = document.createElement("tr");
-
-      const keyCell = document.createElement("td");
-      keyCell.className = "px-6 py-4 whitespace-nowrap text-sm text-gray-800";
-      keyCell.textContent = result.subFinalizadoraKey;
-      row.appendChild(keyCell);
-
-      const statusCell = document.createElement("td");
-      statusCell.className = `px-6 py-4 whitespace-nowrap text-sm font-medium ${
-        result.status === "success" ? "text-green-600" : "text-red-600"
-      }`;
-      statusCell.textContent = result.status === "success" ? "Sucesso" : "Erro";
-      row.appendChild(statusCell);
-
-      const messageCell = document.createElement("td");
-      messageCell.className = "px-6 py-4 text-sm text-gray-800";
-      messageCell.textContent = result.message;
-      row.appendChild(messageCell);
-
-      DOM_ELEMENTS.resultsBody.appendChild(row);
-    });
+    // Não precisa fazer nada aqui pois os resultados já são renderizados em tempo real
   }
 
   addResultsSummary(successCount, errorCount) {
     const summaryRow = document.createElement("tr");
     const summaryCell = document.createElement("td");
     summaryCell.colSpan = 3;
-    summaryCell.className = "px-6 py-4 bg-blue-50 text-sm font-medium text-gray-800";
-    summaryCell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s)`;
+    summaryCell.className = "px-6 py-4 bg-blue-50 text-sm font-semibold text-gray-800 sticky bottom-0 z-10 shadow-md border-t border-gray-200";
+    
+    const skipped = this.state.fileData.length - (successCount + errorCount);
+    if (skipped > 0) {
+      summaryCell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s)`;
+    } else {
+      summaryCell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s)`;
+    }
+    
     summaryRow.appendChild(summaryCell);
     DOM_ELEMENTS.resultsBody.appendChild(summaryRow);
   }

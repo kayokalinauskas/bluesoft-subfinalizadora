@@ -8,22 +8,63 @@ export class DataProcessor {
     return /^\d+$/.test(s) ? parseInt(s, 10) : null;
   }
 
+  static normalizeRowKeys(row) {
+    if (!row || typeof row !== "object") return {};
+    const normalized = {};
+
+    const normalizeStr = (str) => {
+      return String(str)
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // remove acentos
+        .replace(/[^a-z0-9_]/g, "_")      // substitui não-alfanuméricos por underscore
+        .replace(/_+/g, "_")              // remove múltiplos underscores seguidos
+        .replace(/^_+|_+$/g, "");         // remove underscores no início ou fim
+    };
+
+    for (const [key, val] of Object.entries(row)) {
+      const normKey = normalizeStr(key);
+
+      if (/^sub_?finalizadora(_?key)?$/i.test(normKey) || normKey === "codigo_subfinalizadora" || normKey === "subfinalizadorakey") {
+        normalized.sub_finalizadora_key = val;
+      } else if (/^tipo_?tef(_?key)?$/i.test(normKey) || normKey === "tef" || normKey === "tef_key" || normKey === "tipotefkey") {
+        normalized.tipo_tef_key = val;
+      } else if (/^tipo_?(de_?)?cartao$/i.test(normKey) || normKey === "cartao" || normKey === "tipocartao") {
+        normalized.tipo_cartao = val;
+      } else if (/^(cod_?bandeira|codigo_?bandeira|bandeira|codigo_?da_?bandeira)$/i.test(normKey)) {
+        normalized.codigo_bandeira = val;
+      } else if (/^(cod_?administradora|codigo_?administradora|administradora|codigo_?da_?administradora)$/i.test(normKey)) {
+        normalized.codigo_administradora = val;
+      } else if (/^(cod_?autorizadora|codigo_?autorizadora|autorizadora|codigo_?da_?autorizadora)$/i.test(normKey)) {
+        normalized.codigo_autorizadora = val;
+      } else {
+        normalized[normKey] = val;
+      }
+    }
+    return normalized;
+  }
+
   static convertRowToJson(row) {
-    const tipoTef = this.mapTipoTef(row.tipo_tef_key);
-    const tipoCartao = this.mapTipoCartao(row.tipo_cartao);
+    const normRow = this.normalizeRowKeys(row);
+    const tipoTef = this.mapTipoTef(normRow.tipo_tef_key);
+    const tipoCartao = this.mapTipoCartao(normRow.tipo_cartao);
 
     return {
       tipoTef,
-      codigoBandeira: this.parseStrictInt(row.codigo_bandeira),
+      codigoBandeira: this.parseStrictInt(normRow.codigo_bandeira),
       tipoCartao,
-      codigoAdministradora: String(row.codigo_autorizadora ?? row.codigo_administradora ?? ""),
-      subFinalizadoraKey: this.parseStrictInt(row.sub_finalizadora_key),
+      codigoAdministradora: String(normRow.codigo_autorizadora ?? normRow.codigo_administradora ?? ""),
+      subFinalizadoraKey: this.parseStrictInt(normRow.sub_finalizadora_key),
     };
   }
 
   static mapTipoTef(tipoTefKey) {
-    const mapping = { 1: "SITEF", 2: "POS" };
-    return mapping[tipoTefKey] ?? null;
+    if (tipoTefKey === null || tipoTefKey === undefined) return null;
+    const val = String(tipoTefKey).trim().toUpperCase();
+    if (val === "1" || val === "SITEF") return "SITEF";
+    if (val === "2" || val === "POS") return "POS";
+    return null;
   }
 
   static mapTipoCartao(tipoCartao) {
