@@ -7,8 +7,19 @@ import { ApiService } from "./services/api.js";
 import { AppState } from "./state.js";
 
 export class BluesoftIntegrationApp {
+  static FIELD_ERROR_MAP = {
+    tipoTef: /tipo tef/i,
+    codigoBandeira: /bandeira/i,
+    tipoCartao: /tipo cart/i,
+    codigoAdministradora: /administradora/i,
+    subFinalizadoraKey: /subfinalizadora key/i,
+  };
+
+  static PREVIEW_FIELDS = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
+
   constructor() {
     this.state = new AppState();
+    this._filtersSetup = false;
   }
 
   init() {
@@ -162,15 +173,7 @@ export class BluesoftIntegrationApp {
   }
 
   createPreviewRow(data, rowIndex, isValid, errors) {
-    const FIELD_ERROR_MAP = {
-      tipoTef: /tipo tef/i,
-      codigoBandeira: /bandeira/i,
-      tipoCartao: /tipo cart/i,
-      codigoAdministradora: /administradora/i,
-      subFinalizadoraKey: /subfinalizadora key/i,
-    };
-
-    const fields = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
+    const { FIELD_ERROR_MAP, PREVIEW_FIELDS } = BluesoftIntegrationApp;
 
     const row = document.createElement("tr");
     row.dataset.valid = isValid ? "ok" : "erro";
@@ -181,7 +184,7 @@ export class BluesoftIntegrationApp {
     numCell.textContent = rowIndex;
     row.appendChild(numCell);
 
-    fields.forEach((field) => {
+    PREVIEW_FIELDS.forEach((field) => {
       const cell = document.createElement("td");
       const matchingError = errors.find((e) => FIELD_ERROR_MAP[field]?.test(e));
 
@@ -211,6 +214,8 @@ export class BluesoftIntegrationApp {
   }
 
   setupPreviewFilters() {
+    if (this._filtersSetup) return;
+    this._filtersSetup = true;
     document.querySelectorAll(".preview-filter").forEach((el) => {
       const evt = el.tagName === "SELECT" ? "change" : "input";
       el.addEventListener(evt, () => this.applyPreviewFilters());
@@ -320,11 +325,6 @@ export class BluesoftIntegrationApp {
 
   async processSingleRow(row, tenant, token) {
     const jsonData = DataProcessor.convertRowToJson(row);
-    const validation = DataValidator.validateSubmissionData(jsonData);
-
-    if (!validation.isValid) {
-      throw new Error(validation.errors[0]);
-    }
 
     try {
       await ApiService.sendData(tenant, token, jsonData);
@@ -454,10 +454,10 @@ export class BluesoftIntegrationApp {
   collectManualFormData() {
     return {
       tipoTef: DOM_ELEMENTS.manualTipoTef.value,
-      codigoBandeira: parseInt(DOM_ELEMENTS.manualCodigoBandeira.value, 10),
+      codigoBandeira: DataProcessor.parseStrictInt(DOM_ELEMENTS.manualCodigoBandeira.value),
       tipoCartao: DOM_ELEMENTS.manualTipoCartao.value,
       codigoAdministradora: DOM_ELEMENTS.manualCodigoAdministradora.value,
-      subFinalizadoraKey: parseInt(DOM_ELEMENTS.manualSubFinalizadoraKey.value, 10),
+      subFinalizadoraKey: DataProcessor.parseStrictInt(DOM_ELEMENTS.manualSubFinalizadoraKey.value),
     };
   }
 
