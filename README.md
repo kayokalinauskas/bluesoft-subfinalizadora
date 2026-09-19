@@ -8,6 +8,8 @@ Ferramenta web para importação em lote de mapeamentos de subfinalizadoras via 
 ![Vanilla JS](https://img.shields.io/badge/javascript-ES2022-F7DF1E?logo=javascript&logoColor=black)
 ![Deploy](https://img.shields.io/badge/deploy-GitHub%20Pages-222?logo=github)
 
+
+**[Acessar aplicação](https://kayokalinauskas.github.io/bluesoft-subfinalizadora/)**
 ---
 
 ## Funcionalidades
