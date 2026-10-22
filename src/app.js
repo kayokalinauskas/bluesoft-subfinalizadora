@@ -16,6 +16,7 @@ export class BluesoftIntegrationApp {
   };
 
   static PREVIEW_FIELDS = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
+  static FIELD_LABELS = { tipoTef: "Tipo TEF", codigoBandeira: "Bandeira", tipoCartao: "Tipo de cartão", codigoAdministradora: "Administradora", subFinalizadoraKey: "Subfinalizadora" };
 
   constructor() {
     this.state = new AppState();
@@ -23,6 +24,8 @@ export class BluesoftIntegrationApp {
     this.busy = false;
     this.review = null;
     this.fileHasErrors = false;
+    this.workflowSource = "Arquivo";
+    this.resultRows = new Map();
   }
 
   init() {
@@ -43,7 +46,8 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.saveSettingsBtn.addEventListener("click", () => this.saveSettings());
     DOM_ELEMENTS.clearSettingsBtn.addEventListener("click", () => this.clearSettings());
     DOM_ELEMENTS.fileInput.addEventListener("change", (e) => this.handleFileUpload(e));
-    DOM_ELEMENTS.processFileBtn.addEventListener("click", () => this.processFileData());
+    DOM_ELEMENTS.processFileBtn.addEventListener("click", () => this.workflowSource === "Manual"
+      ? DOM_ELEMENTS.manualForm.requestSubmit() : this.processFileData());
     DOM_ELEMENTS.downloadReportBtn.addEventListener("click", () => this.downloadReport());
     DOM_ELEMENTS.manualForm.addEventListener("submit", (e) => this.handleManualSubmit(e));
     DOM_ELEMENTS.clearHistoryBtn.addEventListener("click", () => this.clearHistory());
@@ -78,6 +82,11 @@ export class BluesoftIntegrationApp {
   }
 
   switchTab(tabId, activeButton) {
+    if (this.busy) return;
+    if (tabId === "upload" && this.workflowSource === "Manual") {
+      this.mountWorkflow("Arquivo");
+      this.invalidateReview();
+    }
     DOM_ELEMENTS.tabButtons.forEach((btn) => {
       btn.classList.remove("border-primary", "text-primary", "bg-blue-50");
       btn.classList.add("border-transparent", "text-gray-600");
@@ -125,12 +134,18 @@ export class BluesoftIntegrationApp {
     this.invalidateReview();
     this.state.fileData = [];
     this.fileHasErrors = false;
+    this.state.processingResults = [];
+    this.resultRows.clear();
     const file = event.target.files[0];
     if (!file) {
+      DOM_ELEMENTS.integrationFlow.classList.add("hidden");
       DOM_ELEMENTS.filePreview.classList.add("hidden");
       this.setBusy(false);
       return;
     }
+    this.fileName = file.name;
+    this.mountWorkflow("Arquivo");
+    this.setWorkflowStage("reading", "Lendo e validando as linhas do arquivo…");
     this.setBusy(true);
 
     DOM_ELEMENTS.csvOptions.classList.toggle("hidden", !file.name.toLowerCase().endsWith(".csv") && file.type !== "text/csv");
@@ -144,11 +159,15 @@ export class BluesoftIntegrationApp {
     try {
       this.state.fileData = await DataProcessor.processFile(file, DOM_ELEMENTS.hasHeader.checked);
       await this.showFilePreview();
+      if (!this.state.fileData.length) this.showWorkflowBlock("O arquivo está vazio. Selecione um arquivo com registros.", "Arquivo");
+      else this.setWorkflowStage("ready", this.fileHasErrors
+        ? "Há linhas inválidas. Corrija o arquivo antes de continuar."
+        : `${this.state.fileData.length} registros carregados. Valide a importação para conferir as alterações no ERP.`);
     } catch (error) {
       this.state.fileData = [];
       console.error("Erro no upload:", error);
-      AlertManager.show(`Erro ao processar arquivo: ${error.message}`, "warning");
       DOM_ELEMENTS.filePreview.classList.add("hidden");
+      this.showWorkflowBlock(`Não foi possível ler o arquivo: ${error.message}`, "Arquivo");
     } finally {
       this.setBusy(false);
     }
@@ -319,17 +338,71 @@ export class BluesoftIntegrationApp {
     this.review = null;
     DOM_ELEMENTS.reviewSection.classList.add("hidden");
     DOM_ELEMENTS.confirmReviewBtn.disabled = true;
+    if (this.workflowSource === "Arquivo" && this.state.fileData.length) {
+      this.setWorkflowStage("ready", "Confira os dados do arquivo e valide a importação antes de enviar.");
+    } else DOM_ELEMENTS.integrationFlow.classList.add("hidden");
+  }
+
+  mountWorkflow(source) {
+    this.workflowSource = source;
+    const host = source === "Manual" ? DOM_ELEMENTS.manualWorkflowHost : DOM_ELEMENTS.uploadWorkflowHost;
+    if (DOM_ELEMENTS.integrationFlow.parentElement !== host) host.appendChild(DOM_ELEMENTS.integrationFlow);
+    DOM_ELEMENTS.workflowFileName.textContent = source === "Manual" ? "Registro informado manualmente" : this.fileName || "Arquivo selecionado";
+  }
+
+  setWorkflowProgress(percent, text) {
+    DOM_ELEMENTS.progressTrack.classList.remove("indeterminate");
+    DOM_ELEMENTS.progressTrack.setAttribute("aria-valuenow", String(percent));
+    DOM_ELEMENTS.progressBar.style.width = `${percent}%`;
+    DOM_ELEMENTS.progressText.textContent = text;
+  }
+
+  setWorkflowStage(stage, summary) {
+    const labels = { reading: "Lendo arquivo", ready: "Arquivo pronto", analyzing: "Validando", review: "Pronto para enviar",
+      blocked: "Revisão necessária", checking: "Conferindo", sending: "Enviando", complete: "Concluído", failed: "Concluído com erros", interrupted: "Envio interrompido" };
+    DOM_ELEMENTS.integrationFlow.classList.remove("hidden");
+    DOM_ELEMENTS.integrationFlow.dataset.stage = stage;
+    DOM_ELEMENTS.workflowState.textContent = labels[stage];
+    if (summary !== undefined) DOM_ELEMENTS.reviewSummary.textContent = summary;
+    const step = ["reading", "ready"].includes(stage) ? 1 : ["analyzing", "review", "blocked"].includes(stage) ? 2 : 3;
+    DOM_ELEMENTS.workflowSteps.forEach(item => {
+      const number = Number(item.dataset.step);
+      if (number === step) item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+      item.dataset.complete = String(number < step || stage === "complete");
+    });
+    const waiting = ["reading", "analyzing", "checking"].includes(stage);
+    DOM_ELEMENTS.workflowContent.setAttribute("aria-busy", String(waiting));
+    DOM_ELEMENTS.filePreview.classList.toggle("hidden", !["ready", "reading"].includes(stage) || this.workflowSource !== "Arquivo");
+    DOM_ELEMENTS.reviewSection.classList.toggle("hidden", !["analyzing", "review", "blocked"].includes(stage));
+    DOM_ELEMENTS.resultsSection.classList.toggle("hidden", !["checking", "sending", "complete", "failed", "interrupted"].includes(stage));
+    DOM_ELEMENTS.processFileBtn.classList.toggle("hidden", stage === "review");
+    DOM_ELEMENTS.processFileBtn.textContent = { reading: "Preparando arquivo…", ready: "Validar importação", analyzing: "Validando…", checking: "Conferindo…", sending: "Enviando…" }[stage] || "Analisar novamente";
+    DOM_ELEMENTS.confirmReviewBtn.classList.toggle("hidden", stage !== "review");
+    DOM_ELEMENTS.discardReviewBtn.classList.toggle("hidden", stage !== "review");
+    DOM_ELEMENTS.cancelProcessingBtn.classList.toggle("hidden", !["analyzing", "checking", "sending"].includes(stage));
+    DOM_ELEMENTS.downloadReportBtn.classList.toggle("hidden", !["complete", "failed", "interrupted"].includes(stage) || !this.state.processingResults.length);
+    DOM_ELEMENTS.processingSection.classList.remove("hidden");
+    if (waiting) {
+      DOM_ELEMENTS.progressTrack.classList.add("indeterminate");
+      DOM_ELEMENTS.progressTrack.removeAttribute("aria-valuenow");
+      DOM_ELEMENTS.progressText.textContent = stage === "reading" ? "Preparando o arquivo…" : stage === "analyzing" ? "Consultando o ERP. Nenhuma gravação foi iniciada." : "Conferindo as alterações antes do envio…";
+    } else if (stage === "ready") this.setWorkflowProgress(0, "Aguardando validação");
+    else if (stage === "review") this.setWorkflowProgress(100, "Validação concluída. Confira as alterações abaixo.");
+    else if (stage === "blocked") this.setWorkflowProgress(0, "Envio bloqueado. Revise os detalhes abaixo e analise novamente.");
+    else if (stage === "sending") this.setWorkflowProgress(0, "Iniciando o processamento…");
   }
 
   setBusy(busy) {
     this.busy = busy;
     const controls = [DOM_ELEMENTS.fileInput, DOM_ELEMENTS.hasHeader, DOM_ELEMENTS.processFileBtn,
       DOM_ELEMENTS.saveSettingsBtn, DOM_ELEMENTS.clearSettingsBtn,
-      DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, ...DOM_ELEMENTS.manualForm.elements];
+      DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, ...DOM_ELEMENTS.manualForm.elements, ...DOM_ELEMENTS.tabButtons];
     controls.forEach(control => { control.disabled = busy; });
-    DOM_ELEMENTS.processFileBtn.disabled = busy || this.fileHasErrors || !this.state.fileData.length;
+    DOM_ELEMENTS.processFileBtn.disabled = busy || (this.workflowSource !== "Manual" && (this.fileHasErrors || !this.state.fileData.length));
     DOM_ELEMENTS.confirmReviewBtn.disabled = busy || !this.review || this.review.entries.some(entry => entry.error);
-    DOM_ELEMENTS.discardReviewBtn.textContent = busy ? "Cancelar próximos envios" : "Descartar análise";
+    DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
+    DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar";
   }
 
   async analyzeImport(payloads, source) {
@@ -337,23 +410,30 @@ export class BluesoftIntegrationApp {
     this.invalidateReview();
     const duplicateKeys = payloads.length !== new Set(payloads.map(data => data.subFinalizadoraKey)).size;
     if (duplicateKeys) {
-      AlertManager.show("Há subfinalizadoras repetidas no lote. Corrija a planilha antes de analisar.", "warning");
+      this.showWorkflowBlock("Há subfinalizadoras repetidas no lote. Corrija a planilha antes de analisar.", source);
       return;
     }
     const invalid = payloads.find(data => !DataValidator.validateSubmissionData(data).isValid);
     if (invalid) {
-      AlertManager.show(DataValidator.validateSubmissionData(invalid).errors.join("; "), "warning");
+      this.showWorkflowBlock(DataValidator.validateSubmissionData(invalid).errors.join("; "), source);
       return;
     }
     const tenant = StorageManager.get("bluesoftTenant");
     const token = StorageManager.get("bluesoftToken");
     let entries;
     this.isCancelled = false;
+    this.mountWorkflow(source);
+    DOM_ELEMENTS.manualResults.classList.add("hidden");
     this.setBusy(true);
-    DOM_ELEMENTS.reviewSection.classList.remove("hidden");
     DOM_ELEMENTS.reviewBody.replaceChildren();
-    DOM_ELEMENTS.reviewSummary.textContent = "Consultando o ERP. Nenhum dado foi gravado.";
-    DOM_ELEMENTS.reviewSection.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    const loadingRow = document.createElement("tr");
+    const loadingCell = document.createElement("td");
+    loadingCell.colSpan = 4;
+    loadingCell.className = "px-4 py-12 text-center text-gray-500";
+    loadingCell.textContent = `Validando ${payloads.length} registros e identificando as subfinalizadoras afetadas…`;
+    loadingRow.appendChild(loadingCell);
+    DOM_ELEMENTS.reviewBody.appendChild(loadingRow);
+    this.setWorkflowStage("analyzing", "Validando a importação. Você poderá conferir as alterações antes de enviar.");
     try {
       try {
         entries = await ApiService.planBatch(tenant, token, payloads, {
@@ -363,19 +443,22 @@ export class BluesoftIntegrationApp {
       } catch (error) { entries = payloads.map(data => ({ data, error: error.message })); }
       if (this.isCancelled) {
         this.invalidateReview();
-        AlertManager.show("Análise cancelada. Nenhum dado foi gravado.", "warning");
+        if (source === "Arquivo") DOM_ELEMENTS.reviewSummary.textContent = "Validação cancelada. Nenhum dado foi gravado. Você pode tentar novamente.";
         return;
       }
       this.review = { entries, tenant, token, source };
       const fragment = document.createDocumentFragment();
       for (const entry of entries) this.appendReviewRow(entry, fragment);
-      DOM_ELEMENTS.reviewBody.appendChild(fragment);
+      DOM_ELEMENTS.reviewBody.replaceChildren(fragment);
       const errors = entries.filter(entry => entry.error).length;
       const count = action => entries.filter(entry => entry.plan?.action === action).length;
-      DOM_ELEMENTS.reviewSummary.textContent = `${count("create")} para criar, ${count("update")} para atualizar, ${count("unchanged")} sem alterações, ${errors} bloqueado(s). ` +
-        (errors ? "Corrija os bloqueios e analise novamente. Nenhum dado foi gravado." : "Confira os dados antes de confirmar. Nenhum dado foi gravado.");
+      const changes = count("create") + count("update");
+      DOM_ELEMENTS.confirmReviewBtn.textContent = changes ? `Enviar ${changes} registro${changes === 1 ? "" : "s"} para o ERP` : "Concluir sem alterações";
+      this.setWorkflowStage(errors ? "blocked" : "review", `${count("create")} para criar, ${count("update")} para atualizar, ${count("unchanged")} sem alterações, ${errors} bloqueado(s). ` +
+        (errors ? "Corrija os bloqueios e analise novamente." : ""));
     } finally {
       this.setBusy(false);
+      if (this.review && !this.review.entries.some(entry => entry.error)) DOM_ELEMENTS.confirmReviewBtn.focus({ preventScroll: true });
     }
   }
 
@@ -383,18 +466,31 @@ export class BluesoftIntegrationApp {
     const row = document.createElement("tr");
     const plan = entry.plan;
     const labels = { create: "Criar", update: "Atualizar", unchanged: "Manter sem alterações" };
-    const differences = plan?.differences.map(field => `${field}: ${plan.existing[field]} → ${plan.data[field]}`).join("; ");
+    const differences = plan?.differences.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${plan.existing[field]} → ${plan.data[field]}`).join("; ");
     const details = entry.error || (plan?.action === "create"
-      ? BluesoftIntegrationApp.PREVIEW_FIELDS.map(field => `${field}: ${entry.data[field]}`).join("; ")
+      ? BluesoftIntegrationApp.PREVIEW_FIELDS.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${entry.data[field]}`).join("; ")
       : differences || "Os dados já são idênticos; nenhuma gravação será feita.");
-    for (const text of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? "—", details]) {
+    for (const [index, text] of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? "—", details].entries()) {
       const cell = document.createElement("td");
+      cell.dataset.label = ["Subfinalizadora", "Ação", "Mapa no ERP", "Dados e diferenças"][index];
       cell.className = "px-4 py-3 text-sm text-gray-800 border-b border-gray-100";
       cell.textContent = text;
       row.appendChild(cell);
     }
     if (entry.error) row.className = "bg-red-50";
     container.appendChild(row);
+  }
+
+  showWorkflowBlock(message, source) {
+    this.mountWorkflow(source);
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.className = "px-4 py-6 text-red-700";
+    cell.textContent = message;
+    row.appendChild(cell);
+    DOM_ELEMENTS.reviewBody.replaceChildren(row);
+    this.setWorkflowStage("blocked", message);
   }
 
   async confirmReview() {
@@ -406,17 +502,23 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
     DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar próximos envios";
     DOM_ELEMENTS.resultsBody.replaceChildren();
-    DOM_ELEMENTS.resultsSection.classList.remove("hidden");
-    DOM_ELEMENTS.processingSection.classList.remove("hidden");
+    this.resultRows.clear();
+    for (const entry of review.entries) this.appendRealtimeResultRow({ subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "pending", message: "Aguardando conferência do lote" });
+    this.setWorkflowStage("checking", "Conferindo o lote antes do envio. Acompanhe o resultado de cada registro abaixo.");
     let successes = 0;
     let errors = 0;
     try {
-      DOM_ELEMENTS.progressBar.style.width = "0%";
-      DOM_ELEMENTS.progressBar.textContent = "0%";
-      DOM_ELEMENTS.progressText.textContent = "Conferindo o lote antes de gravar…";
       await ApiService.executeBatch(review.tenant, review.token, review.entries.map(entry => entry.plan), {
         isCancelled: () => this.isCancelled,
+        onProgress: ({ records }) => { DOM_ELEMENTS.progressText.textContent = `Conferindo o lote: ${records} mapas consultados no ERP…`; },
+        onStart: plan => {
+          if (DOM_ELEMENTS.integrationFlow.dataset.stage === "checking") this.setWorkflowStage("sending");
+          this.appendRealtimeResultRow({ subFinalizadoraKey: plan.data.subFinalizadoraKey, status: "processing", message: {
+            create: "Criando mapa no ERP…", update: `Atualizando mapa ${plan.id}…`, unchanged: "Mantendo dados idênticos…",
+          }[plan.action] });
+        },
         onResult: (result, index) => {
+          if (DOM_ELEMENTS.integrationFlow.dataset.stage === "checking") this.setWorkflowStage("sending");
           const entry = review.entries[index];
           if (result.status === "success") {
             result.message = { create: "Criado com sucesso", update: "Atualizado com sucesso", unchanged: "Já existente e idêntico; mantido sem alterações" }[result.action];
@@ -427,69 +529,65 @@ export class BluesoftIntegrationApp {
           this.state.processingResults.push(result);
           this.appendRealtimeResultRow(result);
           const done = successes + errors;
-          DOM_ELEMENTS.reviewSummary.textContent = `Processados ${done}/${review.entries.length}. ${result.message}`;
+          DOM_ELEMENTS.reviewSummary.textContent = `Processados ${done}/${review.entries.length}. ${successes} sucesso(s), ${errors} erro(s).`;
           const progress = Math.round(done / review.entries.length * 100);
-          DOM_ELEMENTS.progressBar.style.width = `${progress}%`;
-          DOM_ELEMENTS.progressBar.textContent = `${progress}%`;
-          DOM_ELEMENTS.progressText.textContent = `${progress}% (${done}/${review.entries.length})`;
+          this.setWorkflowProgress(progress, `${progress}% · ${done} de ${review.entries.length} registros processados`);
         },
       });
       const skipped = review.entries.length - successes - errors;
-      this.addResultsSummary(successes, errors, skipped);
+      for (const entry of review.entries) {
+        const row = this.resultRows.get(entry.data.subFinalizadoraKey);
+        if (row?.dataset.status === "pending") {
+          const result = { subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "cancelled", message: "Não enviado: operação cancelada" };
+          this.appendRealtimeResultRow(result);
+          this.state.processingResults.push(result);
+        }
+      }
       const summary = `${successes} sucesso(s), ${errors} erro(s), ${skipped} cancelado(s).`;
-      DOM_ELEMENTS.reviewSummary.textContent = summary + " Analise novamente para uma nova operação.";
-      if (review.source === "Manual") this.showManualResult(summary, errors === 0 && skipped === 0);
-      else this.switchTab("upload", [...DOM_ELEMENTS.tabButtons].find(button => button.dataset.tab === "upload"));
-      AlertManager.show(summary, errors || skipped ? "warning" : "success");
+      this.setWorkflowStage(skipped ? "interrupted" : errors ? "failed" : "complete", summary + " Você pode baixar o relatório ou analisar novamente.");
+      this.setWorkflowProgress(Math.round((successes + errors) / review.entries.length * 100), `${successes + errors} de ${review.entries.length} registros processados`);
       this.renderHistory();
     } catch (error) {
-      DOM_ELEMENTS.reviewSummary.textContent = error.message;
-      AlertManager.show(error.message, "error");
+      this.setWorkflowStage("blocked", error.message);
     } finally {
       this.review = null;
-      DOM_ELEMENTS.processingSection.classList.add("hidden");
       this.setBusy(false);
+      const nextAction = DOM_ELEMENTS.downloadReportBtn.classList.contains("hidden") ? DOM_ELEMENTS.processFileBtn : DOM_ELEMENTS.downloadReportBtn;
+      nextAction.focus({ preventScroll: true });
     }
   }
 
   appendRealtimeResultRow(result) {
-    const row = document.createElement("tr");
-    row.className = result.status === "success" ? "hover:bg-green-50" : "bg-red-50 hover:bg-red-100";
+    let row = this.resultRows.get(result.subFinalizadoraKey);
+    if (!row) {
+      row = document.createElement("tr");
+      this.resultRows.set(result.subFinalizadoraKey, row);
+      DOM_ELEMENTS.resultsBody.appendChild(row);
+    }
+    row.replaceChildren();
+    row.dataset.status = result.status;
+    row.className = result.status === "error" ? "bg-red-50" : result.status === "success" ? "bg-green-50" : "";
 
     const keyCell = document.createElement("td");
+    keyCell.dataset.label = "Subfinalizadora";
     keyCell.className = "px-6 py-4 whitespace-nowrap text-sm text-gray-800";
     keyCell.textContent = result.subFinalizadoraKey !== null && result.subFinalizadoraKey !== undefined ? result.subFinalizadoraKey : "—";
     row.appendChild(keyCell);
 
     const statusCell = document.createElement("td");
+    statusCell.dataset.label = "Status";
     statusCell.className = `px-6 py-4 whitespace-nowrap text-sm font-medium ${
-      result.status === "success" ? "text-green-600" : "text-red-600"
+      result.status === "success" ? "text-green-700" : result.status === "error" ? "text-red-700" : "text-gray-500"
     }`;
-    statusCell.textContent = result.status === "success" ? "Sucesso" : "Erro";
+    statusCell.textContent = { success: "Sucesso", error: "Erro", pending: "Aguardando", processing: "Em andamento", cancelled: "Não enviado" }[result.status];
     row.appendChild(statusCell);
 
     const messageCell = document.createElement("td");
+    messageCell.dataset.label = "Mensagem";
     messageCell.className = "px-6 py-4 text-sm text-gray-800";
     messageCell.textContent = result.message;
     row.appendChild(messageCell);
 
-    DOM_ELEMENTS.resultsBody.appendChild(row);
-
-    // Auto scroll para o container de resultados à medida que chegam
-    const scrollContainer = DOM_ELEMENTS.resultsBody.closest(".overflow-y-auto") || DOM_ELEMENTS.resultsBody.parentElement;
-    if (scrollContainer) {
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    }
-  }
-
-  addResultsSummary(successCount, errorCount, skipped = 0) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 3;
-    cell.className = "px-6 py-4 bg-blue-50 text-sm font-semibold text-gray-800";
-    cell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s)`;
-    row.appendChild(cell);
-    DOM_ELEMENTS.resultsBody.appendChild(row);
   }
 
   downloadReport() {
@@ -507,7 +605,7 @@ export class BluesoftIntegrationApp {
     const rows = ["Subfinalizadora,Status,Mensagem"];
 
     this.state.processingResults.forEach((result) => {
-      const status = result.status === "success" ? "Sucesso" : "Erro";
+      const status = result.status === "success" ? "Sucesso" : result.status === "cancelled" ? "Não enviado" : "Erro";
       const message = (/^(?:\s*[=+@-]|[\t\r])/.test(result.message) ? "'" + result.message : result.message).replace(/"/g, '""');
       rows.push(`${result.subFinalizadoraKey},${status},"${message}"`);
     });

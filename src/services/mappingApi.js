@@ -165,7 +165,7 @@ export class MappingApi {
     return entry.plan;
   }
 
-  async executeBatch(tenant, token, plans, { isCancelled = () => false, onResult = () => {}, onProgress } = {}) {
+  async executeBatch(tenant, token, plans, { isCancelled = () => false, onResult = () => {}, onStart = () => {}, onProgress } = {}) {
     if (!plans.length || isCancelled()) return [];
     const current = await this.planBatch(tenant, token, plans.map(plan => plan.data), { isCancelled, onProgress });
     // Validamos o lote inteiro antes da primeira escrita, mantendo a revisão.
@@ -183,6 +183,7 @@ export class MappingApi {
         const index = next++;
         const plan = current[index].plan;
         const result = { subFinalizadoraKey: plan.data.subFinalizadoraKey, action: plan.action };
+        onStart(plan, index);
         try {
           if (plan.action !== "unchanged") await this.request(tenant, token, plan.action === "create" ? "POST" : "PUT", plan.action === "update" ? `/${plan.id}` : "", plan.data);
           result.status = "success";
