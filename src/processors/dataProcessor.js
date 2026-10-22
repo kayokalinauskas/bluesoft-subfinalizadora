@@ -5,11 +5,16 @@ export class DataProcessor {
   static parseStrictInt(value) {
     if (value === null || value === undefined) return null;
     const s = String(value).trim();
-    return /^\d+$/.test(s) ? parseInt(s, 10) : null;
+    const number = /^\d+$/.test(s) ? Number(s) : NaN;
+    return Number.isSafeInteger(number) ? number : null;
   }
 
   static normalizeRowKeys(row) {
     if (!row || typeof row !== "object") return {};
+    if (Array.isArray(row)) {
+      const columns = ["sub_finalizadora_key", "codigo_autorizadora", "codigo_bandeira", "tipo_tef_key", "tipo_cartao"];
+      return Object.fromEntries(columns.map((column, index) => [column, row[index]]));
+    }
     const normalized = {};
 
     const normalizeStr = (str) => {
@@ -54,7 +59,7 @@ export class DataProcessor {
       tipoTef,
       codigoBandeira: this.parseStrictInt(normRow.codigo_bandeira),
       tipoCartao,
-      codigoAdministradora: String(normRow.codigo_autorizadora ?? normRow.codigo_administradora ?? ""),
+      codigoAdministradora: String(normRow.codigo_autorizadora ?? normRow.codigo_administradora ?? "").trim(),
       subFinalizadoraKey: this.parseStrictInt(normRow.sub_finalizadora_key),
     };
   }
@@ -70,7 +75,7 @@ export class DataProcessor {
   static mapTipoCartao(tipoCartao) {
     if (!tipoCartao) return null;
 
-    const tipo = tipoCartao.toLowerCase();
+    const tipo = String(tipoCartao).toLowerCase();
     const mapping = {
       parcelado: "CARTAO_PARCELADO",
       crédito: "CARTAO_CREDITO",
@@ -88,7 +93,7 @@ export class DataProcessor {
   }
 
   static async processFile(file, hasHeader) {
-    if (file.name.endsWith(".csv") || file.type === "text/csv") {
+    if (file.name.toLowerCase().endsWith(".csv") || file.type === "text/csv") {
       return await this.processCSV(file, hasHeader);
     } else {
       return await this.processExcel(file);

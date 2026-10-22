@@ -23,7 +23,8 @@ export class AppState {
       this.history.pop();
     }
 
-    this.saveHistory();
+    try { this.saveHistory(); }
+    catch { /* A indisponibilidade do histórico não altera o resultado da gravação no ERP. */ }
   }
 
   saveHistory() {
@@ -34,7 +35,8 @@ export class AppState {
     const savedHistory = StorageManager.get("bluesoftHistory");
     if (savedHistory) {
       try {
-        this.history = JSON.parse(savedHistory);
+        const parsed = JSON.parse(savedHistory);
+        this.history = Array.isArray(parsed) ? parsed.filter(item => item && item.data && typeof item.type === "string").slice(0, CONFIG.MAX_HISTORY_ITEMS) : [];
       } catch (error) {
         console.error("Erro ao carregar histórico:", error);
         this.history = [];

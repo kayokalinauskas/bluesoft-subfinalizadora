@@ -4,7 +4,7 @@
 
 Single-page application (SPA) in vanilla JavaScript for sending "mapa de subfinalizadora" records to the Bluesoft ERP REST API. Uses a Vercel serverless proxy (separate repo) to bypass CORS. Deployed to GitHub Pages.
 
-**This is the frontend-only repository.** The CORS proxy lives in a separate GitHub repo. Do not add backend logic here — `ApiService` calls the proxy URL in `CONFIG.PROXY_URL` and that is the only coupling between the two repos.
+**This is the frontend-only repository.** The CORS proxy lives in a separate GitHub repo. Do not add backend logic here — `ApiService` (a `MappingApi` instance) calls the proxy URL in `CONFIG.PROXY_URL` and that is the only coupling between the two repos.
 
 ---
 
@@ -12,6 +12,7 @@ Single-page application (SPA) in vanilla JavaScript for sending "mapa de subfina
 
 ```bash
 npm run dev       # Vite dev server (http://localhost:5173/bluesoft-subfinalizadora/)
+npm test          # Regression tests (Node 24)
 npm run build     # Production build (outputs to dist/)
 npm run preview   # Preview the production build locally
 ```
@@ -42,7 +43,7 @@ src/
   workers/
     excel.worker.js           — Web Worker (Vite-bundled via ?worker import)
   services/
-    api.js                    — ApiService: POSTs to proxy
+    api.js                    — ApiService: configured MappingApi instance
     storage.js                — StorageManager: localStorage wrapper
   processors/
     dataProcessor.js          — DataProcessor: CSV/Excel parsing + row→payload mapping
@@ -58,7 +59,7 @@ src/
 | `config.js` | — | `CONFIG` (constants/URLs) and `DOM_ELEMENTS` (cached selectors). **All** magic numbers and DOM refs live here. |
 | `app.js` | `BluesoftIntegrationApp` | Mounts all event listeners, tab switching, UI orchestration. Coordinates the other classes. |
 | `state.js` | `AppState` | Owns `fileData`, `processingResults`, `history`. Persists history to localStorage. |
-| `services/api.js` | `ApiService` | `sendData(tenant, token, data)` — POSTs to the Vercel proxy. |
+| `services/api.js` | `ApiService` | `plan(tenant, token, data, mode)` queries and compares maps; `execute(tenant, token, plan)` rechecks and uses POST/PUT only after confirmation. |
 | `services/storage.js` | `StorageManager` | `get/set/remove` localStorage wrapper with try/catch. |
 | `processors/dataProcessor.js` | `DataProcessor` | Parses CSV (`PapaParse worker:true`) and Excel (Vite Web Worker). Maps row fields → API payload via `convertRowToJson`. |
 | `processors/validator.js` | `DataValidator` | `validateSubmissionData(data)` — validates the API payload before sending. |
@@ -141,7 +142,7 @@ Required columns (snake_case):
 | `codigo_autorizadora` ou `codigo_administradora` | STRING | Aceita ambos; `codigo_autorizadora` tem prioridade |
 | `codigo_bandeira` | INTEGER | |
 | `tipo_tef_key` | INTEGER | 1 = SITEF, 2 = POS |
-| `tipo_cartao` | STRING | Substring match (case-insensitive): "parcelado" → `CARTAO_PARCELADO` (checked first), "crédito"/"credito" → `CARTAO_CREDITO`, "voucher" → `CARTAO_VOUCHER`; default = `CARTAO_DEBITO` |
+| `tipo_cartao` | STRING | Substring match (case-insensitive): "parcelado" → `CARTAO_PARCELADO` (checked first), "crédito"/"credito" → `CARTAO_CREDITO`, "voucher" → `CARTAO_VOUCHER`; "débito"/"debito" → `CARTAO_DEBITO`; unknown values are invalid |
 
 ---
 
@@ -158,7 +159,7 @@ Required columns (snake_case):
 Touch these three files together:
 1. `src/processors/validator.js` — add validation rule in `validateSubmissionData`
 2. `src/processors/dataProcessor.js` — add mapping in `convertRowToJson`
-3. `src/services/api.js` — include in the request body in `sendData` (if the field isn't already part of the payload object)
+3. `src/services/mappingApi.js` — include in `MAPPING_FIELDS` and the comparison logic
 
 ### New DOM element
 
@@ -192,7 +193,7 @@ try {
 
 | Library | How loaded | Used in |
 |---|---|---|
-| `xlsx@^0.18` | npm (bundled by Vite into `excel.worker` chunk) | `src/workers/excel.worker.js` |
+| `xlsx@0.20.3` (official SheetJS tarball) | npm (bundled by Vite into `excel.worker` chunk) | `src/workers/excel.worker.js` |
 | `papaparse@^5.4` | npm (bundled into main chunk) | `src/processors/dataProcessor.js` |
 | Font Awesome 6 | CDN `<link>` in `index.html` | `index.html` (icons) |
 | Tailwind CSS v4 | npm via `@tailwindcss/vite` plugin | `index.html`, `src/style.css` |
