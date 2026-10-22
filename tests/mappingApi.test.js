@@ -40,7 +40,7 @@ test('mapa idêntico é preservado sem POST nem PUT', async () => {
 test('PUT usa a chave do mapa, nunca a chave da subfinalizadora', async () => {
   const old = { ...existing, codigoAdministradora: '099' };
   const { api, calls } = mock([page([old]), page([old]), new Response(null, { status: 204 })]);
-  const plan = await api.plan('tenant', 'dummy', data, 'reconcile');
+  const plan = await api.plan('tenant', 'dummy', data);
   assert.deepEqual(plan.differences, ['codigoAdministradora']);
   assert.equal(await api.execute('tenant', 'dummy', plan), 'update');
   assert.equal(calls[2].method, 'PUT');
@@ -48,20 +48,20 @@ test('PUT usa a chave do mapa, nunca a chave da subfinalizadora', async () => {
   assert.deepEqual(JSON.parse(calls[2].body), data);
 });
 
-test('modo padrão não atualiza dados diferentes', async () => {
+test('atualização de dados diferentes é automática na análise', async () => {
   const { api, calls } = mock([page([{ ...existing, codigoBandeira: 1 }])]);
-  await assert.rejects(api.plan('tenant', 'dummy', data), /dados diferentes/);
+  assert.equal((await api.plan('tenant', 'dummy', data)).action, 'update');
   assert.equal(calls.length, 1);
 });
 
 test('mais de um candidato bloqueia atualização mesmo se um for idêntico', async () => {
   const { api } = mock([page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78 }])]);
-  await assert.rejects(api.plan('tenant', 'dummy', data, 'reconcile'), /Mais de um/);
+  await assert.rejects(api.plan('tenant', 'dummy', data), /Mais de um/);
 });
 
 test('consulta todas as páginas e encontra candidato conflitante na segunda', async () => {
   const { api, calls } = mock([{ items: [existing], pagination: { totalPages: 2 } }, { items: [{ ...existing, mapaSubfinalizadoraTefKey: 78 }], pagination: { totalPages: 2 } }]);
-  await assert.rejects(api.plan('tenant', 'dummy', data, 'reconcile'), /Mais de um/);
+  await assert.rejects(api.plan('tenant', 'dummy', data), /Mais de um/);
   assert.equal(calls[1].target.searchParams.get('currentPage'), '1');
 });
 
@@ -87,7 +87,7 @@ test('respostas inválidas nunca são interpretadas como ausência', async () =>
   ];
   for (const responses of invalidResponses) {
     const { api, calls } = mock(responses);
-    await assert.rejects(api.plan('tenant', 'dummy', data, 'reconcile'));
+    await assert.rejects(api.plan('tenant', 'dummy', data));
     assert.ok(calls.every(call => call.method === 'GET'));
   }
 });
@@ -95,7 +95,7 @@ test('respostas inválidas nunca são interpretadas como ausência', async () =>
 test('mudança entre revisão e execução bloqueia a gravação', async () => {
   const previous = { ...existing, codigoAdministradora: '099' };
   const { api, calls } = mock([page([previous]), page([{ ...previous, codigoAdministradora: '100' }])]);
-  const plan = await api.plan('tenant', 'dummy', data, 'reconcile');
+  const plan = await api.plan('tenant', 'dummy', data);
   await assert.rejects(api.execute('tenant', 'dummy', plan), /mudou desde/);
   assert.ok(calls.every(call => call.method === 'GET'));
 });
@@ -122,13 +122,13 @@ test('erros encapsulados pelo proxy antigo também preservam mensagem do ERP', a
 
 test('falta de permissão de consulta não dispara gravações', async () => {
   const { api, calls } = mock([Response.json({}, { status: 403 })]);
-  await assert.rejects(api.plan('tenant', 'dummy', data, 'reconcile'), e => e.status === 403);
+  await assert.rejects(api.plan('tenant', 'dummy', data), e => e.status === 403);
   assert.equal(calls.length, 1);
 });
 
 test('conflito no POST não dispara PUT automático', async () => {
   const { api, calls } = mock([page([]), page([]), Response.json({ detail: 'Já cadastrado' }, { status: 409 })]);
-  const plan = await api.plan('tenant', 'dummy', data, 'reconcile');
+  const plan = await api.plan('tenant', 'dummy', data);
   await assert.rejects(api.execute('tenant', 'dummy', plan), e => e.status === 409);
   assert.deepEqual(calls.map(c => c.method), ['GET', 'GET', 'POST']);
 });
@@ -162,7 +162,7 @@ test('sucesso sem JSON não é transformado em falha de gravação', async () =>
 
 test('zeros à esquerda da administradora são preservados e identificados como diferença', async () => {
   const { api } = mock([page([{ ...existing, codigoAdministradora: '008' }])]);
-  const plan = await api.plan('tenant', 'dummy', { ...data, codigoAdministradora: '8' }, 'reconcile');
+  const plan = await api.plan('tenant', 'dummy', { ...data, codigoAdministradora: '8' });
   assert.deepEqual(plan.differences, ['codigoAdministradora']);
   assert.equal(plan.existing.codigoAdministradora, '008');
 });
@@ -171,11 +171,13 @@ test('lote misto é conciliado e uma segunda importação não grava novamente',
   const payloads = Array.from({ length: 31 }, (_, index) => ({ ...data, subFinalizadoraKey: 5000 + index }));
   const records = new Map(payloads.slice(0, 20).map((value, index) => [value.subFinalizadoraKey, { ...value, codigoAdministradora: index < 10 ? value.codigoAdministradora : '099', mapaSubfinalizadoraTefKey: 100 + index }]));
   const writes = [];
+  let reads = 0;
   const api = new MappingApi('https://proxy.example', async (url, options) => {
     const target = new URL(new URL(url).searchParams.get('url'));
     if (options.method === 'GET') {
-      const record = records.get(Number(target.searchParams.get('subFinalizadoraKey')));
-      return Response.json(page(record ? [record] : []));
+      reads++;
+      assert.equal(target.searchParams.has('subFinalizadoraKey'), false);
+      return Response.json(page([...records.values()]));
     }
     const payload = JSON.parse(options.body);
     const id = options.method === 'PUT' ? Number(target.pathname.split('/').at(-1)) : 200 + writes.length;
@@ -184,19 +186,20 @@ test('lote misto é conciliado e uma segunda importação não grava novamente',
     writes.push(options.method);
     return new Response(null, { status: 204 });
   });
-  const plans = [];
-  for (const payload of payloads) plans.push(await api.plan('tenant', 'dummy', payload, 'reconcile'));
+  const plans = (await api.planBatch('tenant', 'dummy', payloads)).map(entry => entry.plan);
+  assert.equal(reads, 1);
   assert.equal(writes.length, 0);
   assert.equal(plans.filter(plan => plan.action === 'unchanged').length, 10);
   assert.equal(plans.filter(plan => plan.action === 'update').length, 10);
   assert.equal(plans.filter(plan => plan.action === 'create').length, 11);
-  for (const plan of plans) await api.execute('tenant', 'dummy', plan);
+  await api.executeBatch('tenant', 'dummy', plans);
+  assert.equal(reads, 2);
   assert.equal(writes.filter(method => method === 'PUT').length, 10);
   assert.equal(writes.filter(method => method === 'POST').length, 11);
-  for (const payload of payloads) {
-    const plan = await api.plan('tenant', 'dummy', payload, 'reconcile');
-    assert.equal(await api.execute('tenant', 'dummy', plan), 'unchanged');
-  }
+  const repeated = await api.planBatch('tenant', 'dummy', payloads);
+  const results = await api.executeBatch('tenant', 'dummy', repeated.map(entry => entry.plan));
+  assert.ok(results.every(result => result.action === 'unchanged'));
+  assert.equal(reads, 4);
   assert.equal(writes.length, 21);
 });
 
@@ -209,10 +212,74 @@ test('envelope real do beta usa data/currentPage/pageSize e o nome SiTef', async
   const plan = await api.plan('beta', 'dummy', data);
   assert.equal(plan.action, 'unchanged');
   assert.equal(plan.existing.tipoTef, 'SITEF');
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].target.searchParams.get('pageSize'), '1000');
 });
 
 test('envelope data com página incorreta bloqueia envio', async () => {
   const { api } = mock([{ currentPage: 1, pageSize: 100, data: [] }]);
   await assert.rejects(api.plan('beta', 'dummy', data), /página diferente/);
+});
+
+test('paginação usa o tamanho efetivo do ERP e inclui mapas das páginas seguintes', async () => {
+  const second = { ...existing, mapaSubfinalizadoraTefKey: 78, subFinalizadoraKey: 5027 };
+  const third = { ...existing, mapaSubfinalizadoraTefKey: 79, subFinalizadoraKey: 5028 };
+  const { api, calls } = mock([
+    { currentPage: 0, pageSize: 2, data: [existing, second] },
+    { currentPage: 1, pageSize: 2, data: [third] },
+  ]);
+  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, subFinalizadoraKey: 5028 }]);
+  assert.deepEqual(entries.map(entry => entry.plan.id), [77, 79]);
+  assert.equal(calls.length, 2);
+});
+
+test('mudança no último item bloqueia o lote inteiro antes da primeira escrita', async () => {
+  const second = { ...data, subFinalizadoraKey: 999 };
+  const { api, calls } = mock([page([]), page([{ ...second, mapaSubfinalizadoraTefKey: 78 }])]);
+  const entries = await api.planBatch('beta', 'dummy', [data, second]);
+  await assert.rejects(api.executeBatch('beta', 'dummy', entries.map(entry => entry.plan)), /999 mudou desde/);
+  assert.deepEqual(calls.map(call => call.method), ['GET', 'GET']);
+});
+
+test('ambiguidade em inventário compartilhado identifica somente a subfinalizadora afetada', async () => {
+  const { api } = mock([page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78 }])]);
+  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, subFinalizadoraKey: 999 }]);
+  assert.match(entries[0].error, /Mais de um/);
+  assert.equal(entries[1].plan.action, 'create');
+});
+
+for (const cancel of [false, true]) test(`gravações têm no máximo quatro requisições simultâneas; cancelamento=${cancel}`, async () => {
+  const payloads = Array.from({ length: 8 }, (_, i) => ({ ...data, subFinalizadoraKey: 9000 + i }));
+  const pending = [];
+  let active = 0, maximum = 0, writes = 0, cancelled = false;
+  const completed = [];
+  const api = new MappingApi('https://proxy.example', async (_, options) => {
+    if (options.method === 'GET') return Response.json(page([]));
+    writes++;
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise(resolve => pending.push(resolve));
+    active--;
+    return new Response(null, { status: 204 });
+  });
+  const entries = await api.planBatch('beta', 'dummy', payloads);
+  const run = api.executeBatch('beta', 'dummy', entries.map(entry => entry.plan), {
+    isCancelled: () => cancelled,
+    onResult: result => completed.push(result),
+  });
+  await new Promise(setImmediate);
+  assert.equal(writes, 4);
+  assert.equal(active, 4);
+  cancelled = cancel;
+  pending.splice(0).reverse().forEach(resolve => resolve());
+  await new Promise(setImmediate);
+  if (!cancel) {
+    assert.equal(writes, 8);
+    pending.splice(0).forEach(resolve => resolve());
+  }
+  const results = await run;
+  assert.equal(maximum, 4);
+  assert.equal(writes, cancel ? 4 : 8);
+  assert.equal(completed.length, writes);
+  assert.deepEqual(results.map(result => result.subFinalizadoraKey), payloads.slice(0, writes).map(item => item.subFinalizadoraKey));
 });

@@ -1,4 +1,4 @@
-import { CONFIG, DOM_ELEMENTS } from "./config.js";
+import { DOM_ELEMENTS } from "./config.js";
 import { StorageManager } from "./services/storage.js";
 import { AlertManager } from "./ui/alerts.js";
 import { DataValidator } from "./processors/validator.js";
@@ -53,7 +53,7 @@ export class BluesoftIntegrationApp {
       if (this.busy) this.isCancelled = true;
       else this.invalidateReview();
     });
-    [DOM_ELEMENTS.importMode, DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, DOM_ELEMENTS.manualForm].forEach(element => {
+    [DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, DOM_ELEMENTS.manualForm].forEach(element => {
       element.addEventListener("input", () => this.invalidateReview());
       element.addEventListener("change", () => this.invalidateReview());
     });
@@ -324,12 +324,12 @@ export class BluesoftIntegrationApp {
   setBusy(busy) {
     this.busy = busy;
     const controls = [DOM_ELEMENTS.fileInput, DOM_ELEMENTS.hasHeader, DOM_ELEMENTS.processFileBtn,
-      DOM_ELEMENTS.importMode, DOM_ELEMENTS.saveSettingsBtn, DOM_ELEMENTS.clearSettingsBtn,
+      DOM_ELEMENTS.saveSettingsBtn, DOM_ELEMENTS.clearSettingsBtn,
       DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, ...DOM_ELEMENTS.manualForm.elements];
     controls.forEach(control => { control.disabled = busy; });
     DOM_ELEMENTS.processFileBtn.disabled = busy || this.fileHasErrors || !this.state.fileData.length;
     DOM_ELEMENTS.confirmReviewBtn.disabled = busy || !this.review || this.review.entries.some(entry => entry.error);
-    DOM_ELEMENTS.discardReviewBtn.textContent = busy ? "Cancelar após a operação atual" : "Descartar análise";
+    DOM_ELEMENTS.discardReviewBtn.textContent = busy ? "Cancelar próximos envios" : "Descartar análise";
   }
 
   async analyzeImport(payloads, source) {
@@ -347,8 +347,7 @@ export class BluesoftIntegrationApp {
     }
     const tenant = StorageManager.get("bluesoftTenant");
     const token = StorageManager.get("bluesoftToken");
-    const mode = DOM_ELEMENTS.importMode.value;
-    const entries = [];
+    let entries;
     this.isCancelled = false;
     this.setBusy(true);
     DOM_ELEMENTS.reviewSection.classList.remove("hidden");
@@ -356,21 +355,21 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.reviewSummary.textContent = "Consultando o ERP. Nenhum dado foi gravado.";
     DOM_ELEMENTS.reviewSection.scrollIntoView?.({ behavior: "smooth", block: "start" });
     try {
-      for (const data of payloads) {
-        if (this.isCancelled) break;
-        const entry = { data };
-        try { entry.plan = await ApiService.plan(tenant, token, data, mode); }
-        catch (error) { entry.error = error.message; }
-        entries.push(entry);
-        this.appendReviewRow(entry);
-        DOM_ELEMENTS.reviewSummary.textContent = `Analisando ${entries.length}/${payloads.length}. Nenhum dado foi gravado.`;
-      }
+      try {
+        entries = await ApiService.planBatch(tenant, token, payloads, {
+          isCancelled: () => this.isCancelled,
+          onProgress: ({ records }) => { DOM_ELEMENTS.reviewSummary.textContent = `Consultando mapas no ERP: ${records} recebidos. Nenhum dado foi gravado.`; },
+        });
+      } catch (error) { entries = payloads.map(data => ({ data, error: error.message })); }
       if (this.isCancelled) {
         this.invalidateReview();
         AlertManager.show("Análise cancelada. Nenhum dado foi gravado.", "warning");
         return;
       }
       this.review = { entries, tenant, token, source };
+      const fragment = document.createDocumentFragment();
+      for (const entry of entries) this.appendReviewRow(entry, fragment);
+      DOM_ELEMENTS.reviewBody.appendChild(fragment);
       const errors = entries.filter(entry => entry.error).length;
       const count = action => entries.filter(entry => entry.plan?.action === action).length;
       DOM_ELEMENTS.reviewSummary.textContent = `${count("create")} para criar, ${count("update")} para atualizar, ${count("unchanged")} sem alterações, ${errors} bloqueado(s). ` +
@@ -380,7 +379,7 @@ export class BluesoftIntegrationApp {
     }
   }
 
-  appendReviewRow(entry) {
+  appendReviewRow(entry, container = DOM_ELEMENTS.reviewBody) {
     const row = document.createElement("tr");
     const plan = entry.plan;
     const labels = { create: "Criar", update: "Atualizar", unchanged: "Manter sem alterações" };
@@ -395,7 +394,7 @@ export class BluesoftIntegrationApp {
       row.appendChild(cell);
     }
     if (entry.error) row.className = "bg-red-50";
-    DOM_ELEMENTS.reviewBody.appendChild(row);
+    container.appendChild(row);
   }
 
   async confirmReview() {
@@ -405,38 +404,36 @@ export class BluesoftIntegrationApp {
     this.setBusy(true);
     this.state.processingResults = [];
     DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
-    DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar após a operação atual";
+    DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar próximos envios";
     DOM_ELEMENTS.resultsBody.replaceChildren();
     DOM_ELEMENTS.resultsSection.classList.remove("hidden");
     DOM_ELEMENTS.processingSection.classList.remove("hidden");
     let successes = 0;
     let errors = 0;
     try {
-      for (const entry of review.entries) {
-        if (this.isCancelled) break;
-        const result = { subFinalizadoraKey: entry.data.subFinalizadoraKey };
-        try {
-          result.action = await ApiService.execute(review.tenant, review.token, entry.plan);
-          result.status = "success";
-          result.message = { create: "Criado com sucesso", update: "Atualizado com sucesso", unchanged: "Já existente e idêntico; mantido sem alterações" }[result.action];
-          successes++;
-        } catch (error) {
-          result.status = "error";
-          result.message = error.message;
-          errors++;
-        }
-        // Falhas de histórico local não podem transformar um sucesso no ERP em erro.
-        this.state.addHistoryItem(review.source, entry.data, result.status === "success", result.message);
-        this.state.processingResults.push(result);
-        this.appendRealtimeResultRow(result);
-        const done = successes + errors;
-        DOM_ELEMENTS.reviewSummary.textContent = `Processados ${done}/${review.entries.length}. ${result.message}`;
-        const progress = Math.round(done / review.entries.length * 100);
-        DOM_ELEMENTS.progressBar.style.width = `${progress}%`;
-        DOM_ELEMENTS.progressBar.textContent = `${progress}%`;
-        DOM_ELEMENTS.progressText.textContent = `${progress}% (${done}/${review.entries.length})`;
-        if (CONFIG.API_DELAY_MS > 0) await new Promise(resolve => setTimeout(resolve, CONFIG.API_DELAY_MS));
-      }
+      DOM_ELEMENTS.progressBar.style.width = "0%";
+      DOM_ELEMENTS.progressBar.textContent = "0%";
+      DOM_ELEMENTS.progressText.textContent = "Conferindo o lote antes de gravar…";
+      await ApiService.executeBatch(review.tenant, review.token, review.entries.map(entry => entry.plan), {
+        isCancelled: () => this.isCancelled,
+        onResult: (result, index) => {
+          const entry = review.entries[index];
+          if (result.status === "success") {
+            result.message = { create: "Criado com sucesso", update: "Atualizado com sucesso", unchanged: "Já existente e idêntico; mantido sem alterações" }[result.action];
+            successes++;
+          } else errors++;
+          // Falhas de histórico local não podem transformar um sucesso no ERP em erro.
+          this.state.addHistoryItem(review.source, entry.data, result.status === "success", result.message);
+          this.state.processingResults.push(result);
+          this.appendRealtimeResultRow(result);
+          const done = successes + errors;
+          DOM_ELEMENTS.reviewSummary.textContent = `Processados ${done}/${review.entries.length}. ${result.message}`;
+          const progress = Math.round(done / review.entries.length * 100);
+          DOM_ELEMENTS.progressBar.style.width = `${progress}%`;
+          DOM_ELEMENTS.progressBar.textContent = `${progress}%`;
+          DOM_ELEMENTS.progressText.textContent = `${progress}% (${done}/${review.entries.length})`;
+        },
+      });
       const skipped = review.entries.length - successes - errors;
       this.addResultsSummary(successes, errors, skipped);
       const summary = `${successes} sucesso(s), ${errors} erro(s), ${skipped} cancelado(s).`;
@@ -445,6 +442,9 @@ export class BluesoftIntegrationApp {
       else this.switchTab("upload", [...DOM_ELEMENTS.tabButtons].find(button => button.dataset.tab === "upload"));
       AlertManager.show(summary, errors || skipped ? "warning" : "success");
       this.renderHistory();
+    } catch (error) {
+      DOM_ELEMENTS.reviewSummary.textContent = error.message;
+      AlertManager.show(error.message, "error");
     } finally {
       this.review = null;
       DOM_ELEMENTS.processingSection.classList.add("hidden");

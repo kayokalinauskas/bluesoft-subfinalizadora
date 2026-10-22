@@ -1,9 +1,10 @@
 import { DataValidator } from "../processors/validator.js";
 
 export const MAPPING_FIELDS = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 1000;
 const MAX_PAGES = 1000;
 const TIMEOUT_MS = 25000;
+const WRITE_CONCURRENCY = 4;
 
 export class ApiError extends Error {
   constructor(message, status = 0, details = null) {
@@ -77,13 +78,14 @@ export class MappingApi {
     }
   }
 
-  async findExisting(tenant, token, data) {
-    const candidates = [];
+  async readMappings(tenant, token, subFinalizadoraKey, { isCancelled = () => false, onProgress = () => {} } = {}) {
+    const records = [];
     const seen = new Set();
     let expectedPages;
     for (let currentPage = 0; currentPage < MAX_PAGES; currentPage++) {
+      if (isCancelled()) throw new Error("Análise cancelada. Nenhum dado foi gravado.");
       const response = await this.request(tenant, token, "GET", "", undefined, {
-        subFinalizadoraKey: data.subFinalizadoraKey, currentPage, pageSize: PAGE_SIZE,
+        ...(subFinalizadoraKey === undefined ? {} : { subFinalizadoraKey }), currentPage, pageSize: PAGE_SIZE,
       });
       const items = Array.isArray(response) ? response : response?.content ?? response?.items ?? response?.data;
       if (!Array.isArray(items)) throw new Error("Formato de consulta não reconhecido. Nenhum dado será gravado.");
@@ -99,44 +101,108 @@ export class MappingApi {
       expectedPages = totalPages;
       for (const record of items) {
         if (!record || typeof record !== "object") throw new Error("Mapa inválido na consulta ao ERP.");
-        const existing = snapshot(record);
-        if (existing.subFinalizadoraKey !== data.subFinalizadoraKey) throw new Error("O ERP não respeitou o filtro de subfinalizadora. Revise a consulta antes de enviar.");
+        if (subFinalizadoraKey !== undefined && Number(record.subFinalizadoraKey) !== subFinalizadoraKey) throw new Error("O ERP não respeitou o filtro de subfinalizadora. Revise a consulta antes de enviar.");
         const id = mapId(record.mapaSubfinalizadoraTefKey);
         if (seen.has(id)) throw new Error("A consulta retornou mapas repetidos. Revise a paginação no ERP.");
         seen.add(id);
-        candidates.push({ id, data: existing });
+        records.push(record);
       }
+      onProgress({ pages: currentPage + 1, records: records.length });
       if (items.length === 0) {
         if (totalPages !== undefined && currentPage + 1 < totalPages) throw new Error("Página vazia antes do final da consulta ao ERP.");
-        return candidates;
+        return records;
       }
-      if (totalPages !== undefined && currentPage + 1 === totalPages) return candidates;
+      if (totalPages !== undefined && currentPage + 1 === totalPages) return records;
+      // O envelope real informa o tamanho efetivo da página. Sem esse contrato,
+      // continuamos até página vazia, mesmo quando a lista é curta.
+      if (totalPages === undefined && response.currentPage === currentPage && Number.isInteger(response.pageSize) && response.pageSize > 0 && items.length < response.pageSize) return records;
     }
     throw new Error("Limite de páginas excedido. Consulta incompleta; envio bloqueado.");
   }
 
-  async plan(tenant, token, data, mode = "create") {
-    if (!["create", "reconcile"].includes(mode)) throw new Error("Modo de importação inválido.");
+  buildPlan(data, candidates) {
     const validation = DataValidator.validateSubmissionData(data);
     if (!validation.isValid) throw new Error(validation.errors.join("; "));
     const payload = snapshot(data);
-    const candidates = await this.findExisting(tenant, token, payload);
     if (candidates.length > 1) throw new Error("Mais de um mapa encontrado para esta subfinalizadora. Revise os registros no ERP; não é seguro escolher automaticamente.");
     const existing = candidates[0]?.data ?? null;
     const differences = existing ? MAPPING_FIELDS.filter(field => existing[field] !== payload[field]) : [];
     const action = existing ? (differences.length ? "update" : "unchanged") : "create";
-    if (action === "update" && mode !== "reconcile") throw new Error("Já existe um mapa com dados diferentes. Selecione 'Criar e atualizar existentes' e analise novamente.");
-    return Object.freeze({ action, id: candidates[0]?.id ?? null, data: payload, existing, differences: Object.freeze(differences), mode });
+    return Object.freeze({ action, id: candidates[0]?.id ?? null, data: payload, existing, differences: Object.freeze(differences) });
+  }
+
+  async planBatch(tenant, token, payloads, options) {
+    if (!payloads.length) return [];
+    const wanted = new Set();
+    for (const data of payloads) {
+      const validation = DataValidator.validateSubmissionData(data);
+      if (!validation.isValid) throw new Error(validation.errors.join("; "));
+      if (wanted.has(data.subFinalizadoraKey)) throw new Error("Há subfinalizadoras repetidas no lote.");
+      wanted.add(data.subFinalizadoraKey);
+    }
+    // Um único inventário paginado por lote; nada é armazenado entre análises.
+    // Para um registro manual, usamos o filtro para evitar ler toda a coleção.
+    const records = await this.readMappings(tenant, token, payloads.length === 1 ? payloads[0].subFinalizadoraKey : undefined, options);
+    const groups = new Map();
+    for (const record of records) {
+      const key = Number(record.subFinalizadoraKey);
+      if (!wanted.has(key)) continue;
+      const group = groups.get(key) ?? [];
+      group.push(record);
+      groups.set(key, group);
+    }
+    return payloads.map(data => {
+      try {
+        const candidates = (groups.get(data.subFinalizadoraKey) ?? []).map(record => ({ id: mapId(record.mapaSubfinalizadoraTefKey), data: snapshot(record) }));
+        return { data, plan: this.buildPlan(data, candidates) };
+      } catch (error) { return { data, error: error.message }; }
+    });
+  }
+
+  async plan(tenant, token, data) {
+    const [entry] = await this.planBatch(tenant, token, [data]);
+    if (entry.error) throw new Error(entry.error);
+    return entry.plan;
+  }
+
+  async executeBatch(tenant, token, plans, { isCancelled = () => false, onResult = () => {}, onProgress } = {}) {
+    if (!plans.length || isCancelled()) return [];
+    const current = await this.planBatch(tenant, token, plans.map(plan => plan.data), { isCancelled, onProgress });
+    // Validamos o lote inteiro antes da primeira escrita, mantendo a revisão.
+    for (let index = 0; index < plans.length; index++) {
+      const before = plans[index];
+      const after = current[index].plan;
+      if (!after || before.action !== after.action || before.id !== after.id || JSON.stringify(before.existing) !== JSON.stringify(after.existing)) {
+        throw new Error(`A subfinalizadora ${before.data.subFinalizadoraKey} mudou desde a análise. Analise novamente antes de enviar. Nenhum dado foi gravado.`);
+      }
+    }
+    const results = new Array(plans.length);
+    let next = 0;
+    const worker = async () => {
+      while (!isCancelled() && next < current.length) {
+        const index = next++;
+        const plan = current[index].plan;
+        const result = { subFinalizadoraKey: plan.data.subFinalizadoraKey, action: plan.action };
+        try {
+          if (plan.action !== "unchanged") await this.request(tenant, token, plan.action === "create" ? "POST" : "PUT", plan.action === "update" ? `/${plan.id}` : "", plan.data);
+          result.status = "success";
+        } catch (error) {
+          result.status = "error";
+          result.message = error.message;
+          result.httpStatus = error.status;
+          result.details = error.details;
+        }
+        results[index] = result;
+        onResult(result, index);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(WRITE_CONCURRENCY, plans.length) }, worker));
+    return results.filter(Boolean);
   }
 
   async execute(tenant, token, plan) {
-    // Reconsulta antes de gravar: a revisão pode ter ficado desatualizada.
-    const current = await this.plan(tenant, token, plan.data, plan.mode);
-    if (current.action !== plan.action || current.id !== plan.id || JSON.stringify(current.existing) !== JSON.stringify(plan.existing)) {
-      throw new Error("O mapa mudou desde a análise. Analise novamente antes de enviar.");
-    }
-    if (current.action === "unchanged") return "unchanged";
-    await this.request(tenant, token, current.action === "create" ? "POST" : "PUT", current.action === "update" ? `/${current.id}` : "", current.data);
-    return current.action;
+    const [result] = await this.executeBatch(tenant, token, [plan]);
+    if (result.status === "error") throw new ApiError(result.message, result.httpStatus, result.details);
+    return result.action;
   }
 }

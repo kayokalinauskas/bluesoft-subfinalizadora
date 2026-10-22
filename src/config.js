@@ -5,7 +5,6 @@ if (!import.meta.env.VITE_PROXY_URL) {
 export const CONFIG = {
   PROXY_URL: import.meta.env.VITE_PROXY_URL,
   MAX_HISTORY_ITEMS: 60,
-  API_DELAY_MS: 100,
   ALERT_DISPLAY_TIME: 3000,
 };
 
@@ -22,7 +21,6 @@ export const DOM_ELEMENTS = {
   previewSummary: document.getElementById("previewSummary"),
   previewFilterInfo: document.getElementById("previewFilterInfo"),
   processFileBtn: document.getElementById("processFile"),
-  importMode: document.getElementById("importMode"),
   reviewSection: document.getElementById("reviewSection"),
   reviewSummary: document.getElementById("reviewSummary"),
   reviewBody: document.getElementById("reviewBody"),
