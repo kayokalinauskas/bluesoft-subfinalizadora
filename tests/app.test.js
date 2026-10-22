@@ -27,7 +27,6 @@ beforeEach(async () => {
   vite.moduleGraph.invalidateAll();
   const { BluesoftIntegrationApp } = await vite.ssrLoadModule('/src/app.js');
   const config = await vite.ssrLoadModule('/src/config.js');
-  config.CONFIG.API_DELAY_MS = 0;
   controls = config.DOM_ELEMENTS;
   api = (await vite.ssrLoadModule('/src/services/api.js')).ApiService;
   storage = (await vite.ssrLoadModule('/src/services/storage.js')).StorageManager;
@@ -54,7 +53,6 @@ function responses(values, callback = () => {}) {
 }
 
 test('análise exibe diferenças; somente a confirmação dispara PUT', async () => {
-  controls.importMode.value = 'reconcile';
   const old = { ...existing, codigoAdministradora: '099' };
   const calls = responses([page([old]), page([old]), new Response(null, { status: 204 })]);
   await app.analyzeImport([data], 'Manual');
@@ -70,6 +68,33 @@ test('análise exibe diferenças; somente a confirmação dispara PUT', async ()
   assert.equal(controls.confirmReviewBtn.disabled, true);
 });
 
+test('lote compartilha consultas e mostra todas as subfinalizadoras afetadas', async () => {
+  const other = { ...data, subFinalizadoraKey: 999 };
+  const old = { ...existing, codigoAdministradora: '099' };
+  const calls = responses([page([old]), page([old]), new Response(null, { status: 204 }), new Response(null, { status: 201 })]);
+  await app.analyzeImport([data, other], 'Arquivo');
+  assert.deepEqual(calls, ['GET']);
+  assert.equal(document.getElementById('importMode'), null);
+  assert.equal(controls.reviewBody.children.length, 2);
+  assert.match(controls.reviewBody.textContent, /5026Atualizar/);
+  assert.match(controls.reviewBody.textContent, /999Criar/);
+  assert.match(controls.reviewBody.textContent, /099 → 108/);
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET', 'GET', 'PUT', 'POST']);
+  assert.equal(app.state.processingResults.length, 2);
+  assert.match(controls.reviewSummary.textContent, /2 sucesso/);
+});
+
+test('mudança na conferência informa o bloqueio na interface sem gravar', async () => {
+  const calls = responses([page([]), page([existing])]);
+  await app.analyzeImport([data], 'Arquivo');
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET', 'GET']);
+  assert.match(controls.reviewSummary.textContent, /5026 mudou desde/);
+  assert.equal(app.state.processingResults.length, 0);
+  assert.equal(app.busy, false);
+});
+
 test('análise idêntica informa preservação e não grava', async () => {
   const calls = responses([page([existing]), page([existing])]);
   await app.analyzeImport([data], 'Arquivo');
@@ -80,12 +105,12 @@ test('análise idêntica informa preservação e não grava', async () => {
 });
 
 test('erro de consulta bloqueia o lote inteiro', async () => {
-  const calls = responses([Response.json({ detail: 'Sem permissão de consulta' }, { status: 403 }), page([])]);
+  const calls = responses([Response.json({ detail: 'Sem permissão de consulta' }, { status: 403 })]);
   await app.analyzeImport([data, { ...data, subFinalizadoraKey: 999 }], 'Arquivo');
   assert.equal(controls.confirmReviewBtn.disabled, true);
   assert.match(controls.reviewBody.textContent, /Sem permissão/);
   await app.confirmReview();
-  assert.deepEqual(calls, ['GET', 'GET']);
+  assert.deepEqual(calls, ['GET']);
 });
 
 test('subfinalizadoras repetidas no lote são bloqueadas antes da consulta', async () => {
@@ -96,8 +121,8 @@ test('subfinalizadoras repetidas no lote são bloqueadas antes da consulta', asy
   assert.match(messages.join(' '), /repetidas/);
 });
 
-test('alterar modo, dados manuais ou credenciais descarta a revisão', async () => {
-  for (const element of [controls.importMode, controls.manualCodigoAdministradora, controls.tokenInput, controls.tenantInput]) {
+test('alterar dados manuais ou credenciais descarta a revisão', async () => {
+  for (const element of [controls.manualCodigoAdministradora, controls.tokenInput, controls.tenantInput]) {
     responses([page([])]);
     await app.analyzeImport([data], 'Manual');
     element.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
@@ -118,7 +143,7 @@ test('duplo clique não duplica gravações e controles permanecem bloqueados', 
   };
   const pending = app.confirmReview();
   assert.equal(controls.fileInput.disabled, true);
-  assert.equal(controls.importMode.disabled, true);
+  assert.equal(document.getElementById('importMode'), null);
   await app.confirmReview();
   release();
   await pending;
@@ -128,12 +153,12 @@ test('duplo clique não duplica gravações e controles permanecem bloqueados', 
 
 test('cancelamento preserva resultado atual e impede os próximos itens', async () => {
   const second = { ...data, subFinalizadoraKey: 999 };
-  const calls = responses([page([]), page([]), page([]), new Response(null, { status: 201 })], options => {
+  const calls = responses([page([]), page([]), new Response(null, { status: 201 })], options => {
     if (options.method === 'POST') controls.discardReviewBtn.click();
   });
   await app.analyzeImport([data, second], 'Arquivo');
   await app.confirmReview();
-  assert.deepEqual(calls, ['GET', 'GET', 'GET', 'POST']);
+  assert.deepEqual(calls, ['GET', 'GET', 'POST']);
   assert.equal(app.state.processingResults.length, 1);
   assert.match(controls.reviewSummary.textContent, /1 cancelado/);
 });

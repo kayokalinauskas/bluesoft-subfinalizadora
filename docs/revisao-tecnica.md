@@ -5,18 +5,20 @@ A aplicação tinha uma separação útil entre interface, processamento em work
 ## Comportamento corrigido
 
 - A análise consulta o ERP sem gravar, percorre a paginação e apresenta ação, ID do mapa e diferenças por campo.
-- O modo padrão cria ausentes e preserva os idênticos. Mapas diferentes exigem o modo de atualização e confirmação explícita.
+- Há um único fluxo: criar ausentes, atualizar diferentes e preservar idênticos. A revisão mostra todas as subfinalizadoras afetadas, com confirmação explícita.
 - PUT usa `mapaSubfinalizadoraTefKey` retornado pela consulta; `subFinalizadoraKey` não identifica o mapa a atualizar.
 - Mais de um mapa para a subfinalizadora, dados inconsistentes, paginação repetida, formato desconhecido e falhas de consulta bloqueiam a confirmação de todo o lote. Não presumimos uma regra de unicidade ausente da documentação.
 - Linhas inválidas e subfinalizadoras repetidas no arquivo precisam ser corrigidas; não são descartadas silenciosamente.
-- Cada item é consultado novamente antes da execução. Uma mudança de ação, ID ou dados existentes exige nova análise. Isso reduz o risco de sobrescrever dados desatualizados, mas não substitui escrita condicional/ETag no ERP: ainda há uma janela entre GET e PUT.
+- O inventário do lote é consultado novamente antes da execução. Uma mudança de ação, ID ou dados existentes em qualquer item exige nova análise antes da primeira escrita. Isso reduz o risco de sobrescrever dados desatualizados, mas não substitui escrita condicional/ETag no ERP: ainda há uma janela entre GET e PUT.
 - Não há fallback automático de POST com erro para PUT, nem repetição automática de escritas. Em falhas de comunicação, a gravação pode ter ocorrido; uma nova análise é necessária antes de reenviar.
-- A execução é sequencial. Cancelar interrompe os próximos itens, depois da operação em andamento. Não existe transação ou reversão automática do lote.
+- A execução tem até quatro gravações simultâneas, sem pausas artificiais. Cancelar impede novos envios e aguarda os que estão em andamento. Não existe transação ou reversão automática do lote.
 - O histórico local é auxiliar; sua indisponibilidade não altera o resultado de uma gravação. Relatórios neutralizam mensagens que poderiam ser interpretadas como fórmulas de planilha.
 
 ## Contrato de integração
 
-O GET usa o endpoint da coleção, com `subFinalizadoraKey`, `currentPage` (base zero) e `pageSize=100`. O envelope real foi confirmado no beta: `{ currentPage, pageSize, data: [...] }`. Aceitamos também listas JSON ou objetos com `content`/`items` e, opcionalmente, `totalPages`/`pagination.totalPages`. Sem contagem de páginas, percorremos até página vazia; uma página curta não prova que a consulta acabou. Qualquer formato diferente é bloqueado para revisão do contrato, em vez de ser tratado como ausência de registros.
+O GET usa o endpoint da coleção, com `currentPage` (base zero) e `pageSize=1000`. Para um registro manual, aplica `subFinalizadoraKey`; para lotes, consulta o inventário uma vez e indexa os mapas por subfinalizadora. O envelope real foi confirmado no beta: `{ currentPage, pageSize, data: [...] }`. Uma página com menos itens que o `pageSize` efetivo informado nesse envelope encerra a leitura. Aceitamos também listas JSON ou objetos com `content`/`items` e, opcionalmente, `totalPages`/`pagination.totalPages`. Sem metadados suficientes, percorremos até página vazia. Qualquer formato diferente é bloqueado para revisão do contrato, em vez de ser tratado como ausência de registros. Não há cache de dados ou credenciais entre análises.
+
+O PUT exige um mapa existente. O teste autenticado com um ID ausente retornou 404, sem criar registro para a subfinalizadora de teste. Inclusões continuam usando POST. A comparação de desempenho, as requisições e os testes de concorrência estão em [Desempenho](desempenho.md).
 
 As permissões documentadas são 4301 (consultar), 4302 (incluir) e 4303 (atualizar). O contrato foi confirmado por consultas autenticadas ao tenant `beta` e pelo OpenAPI oficial em `https://erp.bluesoft.com.br/beta/api/v3/api-docs`. O ERP pode retornar `SiTef` como nome de exibição; a comparação normaliza esse valor para `SITEF`. Uma página com índice diferente do solicitado bloqueia a importação.
 

@@ -63,12 +63,7 @@
       </div>
 
       <div class="bg-white rounded-xl shadow-md p-6 mb-8">
-        <label for="importMode" class="block text-lg font-semibold text-gray-800 mb-2">Modo de importação</label>
-        <select id="importMode" class="w-full px-4 py-2 border border-gray-300 rounded-lg">
-          <option value="create">Criar novos — preservar mapas existentes</option>
-          <option value="reconcile">Criar e atualizar existentes</option>
-        </select>
-        <p class="mt-2 text-sm text-gray-600">Primeiro analisamos os registros no ERP. Mapas idênticos são mantidos. As gravações só começam após sua confirmação.</p>
+        <p class="text-sm text-gray-600">A importação atualiza os mapas existentes e cria os ausentes. Antes de confirmar, confira as subfinalizadoras afetadas e as diferenças. Dados idênticos são mantidos sem novo envio.</p>
       </div>
 
       <section id="reviewSection" class="hidden bg-white rounded-xl shadow-md p-6 mb-8" aria-labelledby="reviewHeading">
@@ -80,7 +75,7 @@
             <tbody id="reviewBody"></tbody>
           </table>
         </div>
-        <p class="text-sm text-gray-600 my-4">Cada item será consultado novamente antes de gravar. Não há reversão automática dos itens já gravados. Cancelar interrompe os próximos itens após a operação atual.</p>
+        <p class="text-sm text-gray-600 my-4">O lote será conferido novamente antes de gravar. Não há reversão automática dos itens já gravados. Ao cancelar, os envios em andamento serão concluídos e nenhum novo envio será iniciado.</p>
         <div class="flex flex-wrap gap-3">
           <button type="button" id="confirmReview" disabled class="bg-success text-white px-5 py-2 rounded-lg disabled:opacity-50">Confirmar envio</button>
           <button type="button" id="discardReview" class="bg-gray-200 text-gray-800 px-5 py-2 rounded-lg">Descartar análise</button>
