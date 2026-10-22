@@ -50,7 +50,8 @@ src/
   workers/
     excel.worker.js         # Parsing de Excel off-thread (Web Worker Vite-bundled)
   services/
-    api.js                  # POST para o proxy Vercel
+    api.js                  # Instância configurada do serviço de conciliação
+    mappingApi.js           # Consulta, comparação e execução de POST/PUT
     storage.js              # Wrapper de localStorage
   processors/
     dataProcessor.js        # Parse de arquivos + mapeamento de colunas → payload
@@ -105,12 +106,32 @@ npm run preview  # preview do build de produção
 | `codigo_autorizadora` ou `codigo_administradora` | string | `codigo_autorizadora` tem prioridade |
 | `codigo_bandeira` | inteiro | |
 | `tipo_tef_key` | inteiro | `1` = SITEF · `2` = POS |
-| `tipo_cartao` | string | Substring match: "parcelado" → `CARTAO_PARCELADO`, "crédito" → `CARTAO_CREDITO`, "voucher" → `CARTAO_VOUCHER`; padrão = `CARTAO_DEBITO` |
+| `tipo_cartao` | string | Substring match: "parcelado" → `CARTAO_PARCELADO`, "crédito" → `CARTAO_CREDITO`, "voucher" → `CARTAO_VOUCHER`; "débito"/"debito" → `CARTAO_DEBITO`; valores desconhecidos são inválidos |
 
-Linhas inválidas são removidas automaticamente antes do envio, com contagem exibida ao usuário.
+Linhas inválidas são sinalizadas na prévia e bloqueiam o envio do lote até a correção do arquivo.
 
 ---
 
 ## Deploy
 
 O build é publicado automaticamente no GitHub Pages via GitHub Actions a cada push na `main`. O Vite gera assets com hash no nome para cache-busting automático.
+
+## Análise e atualização de mapas
+
+Use Node.js 24. As duas aplicações precisam ser publicadas: este frontend e o proxy do repositório `nodejs-serverless-function-express`.
+
+1. Salve tenant e token. Escolha **Criar novos** (padrão) ou **Criar e atualizar existentes**.
+2. Carregue o arquivo e clique em **Analisar importação**, ou preencha o formulário manual e clique em **Analisar dados**. A análise apenas consulta o ERP (permissão 4301).
+3. Confira a revisão: criar, manter sem alterações ou atualizar, com ID do mapa e diferenças campo a campo.
+4. Clique em **Confirmar envio**. Inclusões exigem permissão 4302; atualizações, 4303.
+
+Mapas idênticos não são reenviados. Atualizações usam o ID do mapa retornado pelo ERP, nunca a chave da subfinalizadora como ID. Consultas ambíguas ou inconsistentes bloqueiam o lote; não há tentativa automática de PUT depois de um POST com erro. Corrija linhas inválidas ou repetidas e analise novamente. Cancelar interrompe os próximos itens; não reverte os já gravados.
+
+```bash
+npm ci
+npm test
+npm run build
+npm run audit:security
+```
+
+O SheetJS é instalado pela distribuição oficial, com integridade registrada no lockfile. A auditoria não reportou vulnerabilidades. O contrato real do ERP, a validação no beta e as limitações de concorrência estão em [Revisão técnica](docs/revisao-tecnica.md). `npm test` usa serviços simulados e não grava no ERP.

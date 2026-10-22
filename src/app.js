@@ -20,6 +20,9 @@ export class BluesoftIntegrationApp {
   constructor() {
     this.state = new AppState();
     this._filtersSetup = false;
+    this.busy = false;
+    this.review = null;
+    this.fileHasErrors = false;
   }
 
   init() {
@@ -28,6 +31,7 @@ export class BluesoftIntegrationApp {
     this.setupEventListeners();
     this.setupTabs();
     this.renderHistory();
+    this.setBusy(false);
   }
 
   loadSettings() {
@@ -44,6 +48,19 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.manualForm.addEventListener("submit", (e) => this.handleManualSubmit(e));
     DOM_ELEMENTS.clearHistoryBtn.addEventListener("click", () => this.clearHistory());
     
+    DOM_ELEMENTS.confirmReviewBtn.addEventListener("click", () => this.confirmReview());
+    DOM_ELEMENTS.discardReviewBtn.addEventListener("click", () => {
+      if (this.busy) this.isCancelled = true;
+      else this.invalidateReview();
+    });
+    [DOM_ELEMENTS.importMode, DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, DOM_ELEMENTS.manualForm].forEach(element => {
+      element.addEventListener("input", () => this.invalidateReview());
+      element.addEventListener("change", () => this.invalidateReview());
+    });
+    DOM_ELEMENTS.hasHeader.addEventListener("change", () => {
+      if (DOM_ELEMENTS.fileInput.files.length) this.handleFileUpload({ target: DOM_ELEMENTS.fileInput });
+    });
+
     DOM_ELEMENTS.cancelProcessingBtn.addEventListener("click", () => {
       this.isCancelled = true;
       DOM_ELEMENTS.cancelProcessingBtn.disabled = true;
@@ -74,11 +91,12 @@ export class BluesoftIntegrationApp {
   }
 
   saveSettings() {
+    this.invalidateReview();
     const tenant = DOM_ELEMENTS.tenantInput.value.trim();
     const token = DOM_ELEMENTS.tokenInput.value.trim();
 
-    if (!tenant || !token) {
-      AlertManager.show("Por favor, preencha ambos os campos: Tenant e Token", "warning");
+    if (!/^[a-zA-Z0-9_-]+$/.test(tenant) || !token) {
+      AlertManager.show("Informe um tenant válido (letras, números, hífen ou sublinhado) e o token.", "warning");
       return;
     }
 
@@ -93,6 +111,7 @@ export class BluesoftIntegrationApp {
 
   clearSettings() {
     if (confirm("Tem certeza que deseja limpar as configurações?")) {
+      this.invalidateReview();
       StorageManager.remove("bluesoftTenant");
       StorageManager.remove("bluesoftToken");
       DOM_ELEMENTS.tenantInput.value = "";
@@ -102,27 +121,36 @@ export class BluesoftIntegrationApp {
   }
 
   async handleFileUpload(event) {
+    if (this.busy) return;
+    this.invalidateReview();
+    this.state.fileData = [];
+    this.fileHasErrors = false;
     const file = event.target.files[0];
-    if (!file) return;
+    if (!file) {
+      DOM_ELEMENTS.filePreview.classList.add("hidden");
+      this.setBusy(false);
+      return;
+    }
+    this.setBusy(true);
 
-    DOM_ELEMENTS.csvOptions.classList.toggle("hidden", !file.name.endsWith(".csv") && file.type !== "text/csv");
+    DOM_ELEMENTS.csvOptions.classList.toggle("hidden", !file.name.toLowerCase().endsWith(".csv") && file.type !== "text/csv");
 
     DOM_ELEMENTS.fileInput.disabled = true;
     DOM_ELEMENTS.processFileBtn.disabled = true;
     DOM_ELEMENTS.filePreview.classList.remove("hidden");
     DOM_ELEMENTS.previewBody.innerHTML =
-      '<tr><td colspan="5" class="px-6 py-8 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Processando arquivo...</td></tr>';
+      '<tr><td colspan="7" class="px-6 py-8 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Processando arquivo...</td></tr>';
 
     try {
       this.state.fileData = await DataProcessor.processFile(file, DOM_ELEMENTS.hasHeader.checked);
       await this.showFilePreview();
     } catch (error) {
+      this.state.fileData = [];
       console.error("Erro no upload:", error);
       AlertManager.show(`Erro ao processar arquivo: ${error.message}`, "warning");
       DOM_ELEMENTS.filePreview.classList.add("hidden");
     } finally {
-      DOM_ELEMENTS.fileInput.disabled = false;
-      DOM_ELEMENTS.processFileBtn.disabled = false;
+      this.setBusy(false);
     }
   }
 
@@ -150,13 +178,11 @@ export class BluesoftIntegrationApp {
     const validCount = tableRows.filter((r) => r.isValid).length;
     const errorCount = tableRows.length - validCount;
 
-    // Apenas linhas válidas são enviadas à API
-    this.state.fileData = tableRows.filter((r) => r.isValid).map((r) => r.originalRow);
+    // O lote inteiro precisa ser válido antes de consultar ou gravar.
+    this.fileHasErrors = errorCount > 0;
 
     if (validCount === 0) {
       AlertManager.show("Nenhuma linha válida encontrada no arquivo. Verifique as colunas necessárias.", "warning");
-      DOM_ELEMENTS.filePreview.classList.add("hidden");
-      return;
     }
 
     DOM_ELEMENTS.previewSummary.innerHTML =
@@ -271,123 +297,158 @@ export class BluesoftIntegrationApp {
   }
 
   async processFileData() {
-    if (!this.validateCredentials()) return;
-    if (this.state.fileData.length === 0) {
-      AlertManager.show("Nenhum dado para processar.", "warning");
+    if (this.busy || !this.validateCredentials()) return;
+    if (this.fileHasErrors || this.state.fileData.length === 0) {
+      AlertManager.show("Corrija as linhas inválidas e carregue o arquivo novamente antes de analisar.", "warning");
       return;
     }
-
-    this.showProcessingUI();
-    await this.processAllRows();
+    await this.analyzeImport(this.state.fileData.map(row => DataProcessor.convertRowToJson(row)), "Arquivo");
   }
 
   validateCredentials() {
     const tenant = StorageManager.get("bluesoftTenant");
     const token = StorageManager.get("bluesoftToken");
-
-    if (!tenant || !token) {
-      AlertManager.show("Por favor, configure o Tenant e Token antes de enviar os dados.", "warning");
+    if (!tenant || !token || tenant !== DOM_ELEMENTS.tenantInput.value.trim() || token !== DOM_ELEMENTS.tokenInput.value.trim()) {
+      AlertManager.show("Salve o Tenant e Token nas configurações antes de analisar os dados.", "warning");
       return false;
     }
-
     return true;
   }
 
-  showProcessingUI() {
-    DOM_ELEMENTS.processingSection.classList.remove("hidden");
-    DOM_ELEMENTS.resultsSection.classList.remove("hidden");
-    DOM_ELEMENTS.resultsBody.innerHTML = "";
-    DOM_ELEMENTS.processFileBtn.disabled = true;
-
-    // Reset botão cancelar
-    DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
-    DOM_ELEMENTS.cancelProcessingBtn.innerHTML = '<i class="fas fa-ban mr-2"></i> Cancelar Envio';
-    DOM_ELEMENTS.cancelProcessingBtn.classList.remove("hidden");
-
-    this.state.processingResults = [];
+  invalidateReview() {
+    this.review = null;
+    DOM_ELEMENTS.reviewSection.classList.add("hidden");
+    DOM_ELEMENTS.confirmReviewBtn.disabled = true;
   }
 
-  async processAllRows() {
+  setBusy(busy) {
+    this.busy = busy;
+    const controls = [DOM_ELEMENTS.fileInput, DOM_ELEMENTS.hasHeader, DOM_ELEMENTS.processFileBtn,
+      DOM_ELEMENTS.importMode, DOM_ELEMENTS.saveSettingsBtn, DOM_ELEMENTS.clearSettingsBtn,
+      DOM_ELEMENTS.tenantInput, DOM_ELEMENTS.tokenInput, ...DOM_ELEMENTS.manualForm.elements];
+    controls.forEach(control => { control.disabled = busy; });
+    DOM_ELEMENTS.processFileBtn.disabled = busy || this.fileHasErrors || !this.state.fileData.length;
+    DOM_ELEMENTS.confirmReviewBtn.disabled = busy || !this.review || this.review.entries.some(entry => entry.error);
+    DOM_ELEMENTS.discardReviewBtn.textContent = busy ? "Cancelar após a operação atual" : "Descartar análise";
+  }
+
+  async analyzeImport(payloads, source) {
+    if (this.busy || !payloads.length) return;
+    this.invalidateReview();
+    const duplicateKeys = payloads.length !== new Set(payloads.map(data => data.subFinalizadoraKey)).size;
+    if (duplicateKeys) {
+      AlertManager.show("Há subfinalizadoras repetidas no lote. Corrija a planilha antes de analisar.", "warning");
+      return;
+    }
+    const invalid = payloads.find(data => !DataValidator.validateSubmissionData(data).isValid);
+    if (invalid) {
+      AlertManager.show(DataValidator.validateSubmissionData(invalid).errors.join("; "), "warning");
+      return;
+    }
     const tenant = StorageManager.get("bluesoftTenant");
     const token = StorageManager.get("bluesoftToken");
-
+    const mode = DOM_ELEMENTS.importMode.value;
+    const entries = [];
     this.isCancelled = false;
-    const total = this.state.fileData.length;
-    let processedCount = 0;
-    let successCount = 0;
-    let errorCount = 0;
-
-    let currentIndex = 0;
-
-    const worker = async () => {
-      while (currentIndex < total && !this.isCancelled) {
-        const index = currentIndex++;
-        const row = this.state.fileData[index];
-
-        try {
-          await this.processSingleRow(row, tenant, token);
-          successCount++;
-        } catch {
-          errorCount++;
-        }
-
-        processedCount++;
-        this.updateProgress(processedCount - 1, total);
-
-        if (CONFIG.API_DELAY_MS > 0) {
-          await this.delay(CONFIG.API_DELAY_MS);
-        }
-      }
-    };
-
-    // Pool de concorrência com limite de até 5 workers simultâneos
-    const CONCURRENCY = 5;
-    const workers = [];
-    for (let i = 0; i < Math.min(CONCURRENCY, total); i++) {
-      workers.push(worker());
-    }
-
-    await Promise.all(workers);
-
-    this.showResults(successCount, errorCount);
-  }
-
-  updateProgress(currentIndex, total) {
-    const progress = Math.round(((currentIndex + 1) / total) * 100);
-    DOM_ELEMENTS.progressBar.style.width = `${progress}%`;
-    DOM_ELEMENTS.progressBar.textContent = `${progress}%`;
-    DOM_ELEMENTS.progressText.textContent = `${progress}% (${currentIndex + 1}/${total})`;
-  }
-
-  async processSingleRow(row, tenant, token) {
-    const jsonData = DataProcessor.convertRowToJson(row);
-    let result;
-
+    this.setBusy(true);
+    DOM_ELEMENTS.reviewSection.classList.remove("hidden");
+    DOM_ELEMENTS.reviewBody.replaceChildren();
+    DOM_ELEMENTS.reviewSummary.textContent = "Consultando o ERP. Nenhum dado foi gravado.";
+    DOM_ELEMENTS.reviewSection.scrollIntoView?.({ behavior: "smooth", block: "start" });
     try {
-      await ApiService.sendData(tenant, token, jsonData);
-
-      result = {
-        subFinalizadoraKey: jsonData.subFinalizadoraKey,
-        status: "success",
-        message: "Enviado com sucesso",
-      };
-
-      this.state.addHistoryItem("Arquivo", jsonData, true);
-    } catch (error) {
-      result = {
-        subFinalizadoraKey: jsonData.subFinalizadoraKey,
-        status: "error",
-        message: error.message,
-      };
-
-      this.state.addHistoryItem("Arquivo", jsonData, false, error.message);
+      for (const data of payloads) {
+        if (this.isCancelled) break;
+        const entry = { data };
+        try { entry.plan = await ApiService.plan(tenant, token, data, mode); }
+        catch (error) { entry.error = error.message; }
+        entries.push(entry);
+        this.appendReviewRow(entry);
+        DOM_ELEMENTS.reviewSummary.textContent = `Analisando ${entries.length}/${payloads.length}. Nenhum dado foi gravado.`;
+      }
+      if (this.isCancelled) {
+        this.invalidateReview();
+        AlertManager.show("Análise cancelada. Nenhum dado foi gravado.", "warning");
+        return;
+      }
+      this.review = { entries, tenant, token, source };
+      const errors = entries.filter(entry => entry.error).length;
+      const count = action => entries.filter(entry => entry.plan?.action === action).length;
+      DOM_ELEMENTS.reviewSummary.textContent = `${count("create")} para criar, ${count("update")} para atualizar, ${count("unchanged")} sem alterações, ${errors} bloqueado(s). ` +
+        (errors ? "Corrija os bloqueios e analise novamente. Nenhum dado foi gravado." : "Confira os dados antes de confirmar. Nenhum dado foi gravado.");
+    } finally {
+      this.setBusy(false);
     }
+  }
 
-    this.state.processingResults.push(result);
-    this.appendRealtimeResultRow(result);
+  appendReviewRow(entry) {
+    const row = document.createElement("tr");
+    const plan = entry.plan;
+    const labels = { create: "Criar", update: "Atualizar", unchanged: "Manter sem alterações" };
+    const differences = plan?.differences.map(field => `${field}: ${plan.existing[field]} → ${plan.data[field]}`).join("; ");
+    const details = entry.error || (plan?.action === "create"
+      ? BluesoftIntegrationApp.PREVIEW_FIELDS.map(field => `${field}: ${entry.data[field]}`).join("; ")
+      : differences || "Os dados já são idênticos; nenhuma gravação será feita.");
+    for (const text of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? "—", details]) {
+      const cell = document.createElement("td");
+      cell.className = "px-4 py-3 text-sm text-gray-800 border-b border-gray-100";
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    if (entry.error) row.className = "bg-red-50";
+    DOM_ELEMENTS.reviewBody.appendChild(row);
+  }
 
-    if (result.status === "error") {
-      throw new Error(result.message);
+  async confirmReview() {
+    const review = this.review;
+    if (this.busy || !review || review.entries.some(entry => entry.error)) return;
+    this.isCancelled = false;
+    this.setBusy(true);
+    this.state.processingResults = [];
+    DOM_ELEMENTS.cancelProcessingBtn.disabled = false;
+    DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar após a operação atual";
+    DOM_ELEMENTS.resultsBody.replaceChildren();
+    DOM_ELEMENTS.resultsSection.classList.remove("hidden");
+    DOM_ELEMENTS.processingSection.classList.remove("hidden");
+    let successes = 0;
+    let errors = 0;
+    try {
+      for (const entry of review.entries) {
+        if (this.isCancelled) break;
+        const result = { subFinalizadoraKey: entry.data.subFinalizadoraKey };
+        try {
+          result.action = await ApiService.execute(review.tenant, review.token, entry.plan);
+          result.status = "success";
+          result.message = { create: "Criado com sucesso", update: "Atualizado com sucesso", unchanged: "Já existente e idêntico; mantido sem alterações" }[result.action];
+          successes++;
+        } catch (error) {
+          result.status = "error";
+          result.message = error.message;
+          errors++;
+        }
+        // Falhas de histórico local não podem transformar um sucesso no ERP em erro.
+        this.state.addHistoryItem(review.source, entry.data, result.status === "success", result.message);
+        this.state.processingResults.push(result);
+        this.appendRealtimeResultRow(result);
+        const done = successes + errors;
+        DOM_ELEMENTS.reviewSummary.textContent = `Processados ${done}/${review.entries.length}. ${result.message}`;
+        const progress = Math.round(done / review.entries.length * 100);
+        DOM_ELEMENTS.progressBar.style.width = `${progress}%`;
+        DOM_ELEMENTS.progressBar.textContent = `${progress}%`;
+        DOM_ELEMENTS.progressText.textContent = `${progress}% (${done}/${review.entries.length})`;
+        if (CONFIG.API_DELAY_MS > 0) await new Promise(resolve => setTimeout(resolve, CONFIG.API_DELAY_MS));
+      }
+      const skipped = review.entries.length - successes - errors;
+      this.addResultsSummary(successes, errors, skipped);
+      const summary = `${successes} sucesso(s), ${errors} erro(s), ${skipped} cancelado(s).`;
+      DOM_ELEMENTS.reviewSummary.textContent = summary + " Analise novamente para uma nova operação.";
+      if (review.source === "Manual") this.showManualResult(summary, errors === 0 && skipped === 0);
+      else this.switchTab("upload", [...DOM_ELEMENTS.tabButtons].find(button => button.dataset.tab === "upload"));
+      AlertManager.show(summary, errors || skipped ? "warning" : "success");
+      this.renderHistory();
+    } finally {
+      this.review = null;
+      DOM_ELEMENTS.processingSection.classList.add("hidden");
+      this.setBusy(false);
     }
   }
 
@@ -421,46 +482,14 @@ export class BluesoftIntegrationApp {
     }
   }
 
-  delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  showResults(successCount, errorCount) {
-    DOM_ELEMENTS.processingSection.classList.add("hidden");
-    DOM_ELEMENTS.resultsSection.classList.remove("hidden");
-    DOM_ELEMENTS.processFileBtn.disabled = false;
-    DOM_ELEMENTS.cancelProcessingBtn.classList.add("hidden");
-
-    this.addResultsSummary(successCount, errorCount);
-    this.renderHistory();
-
-    if (this.isCancelled) {
-      const skipped = this.state.fileData.length - (successCount + errorCount);
-      AlertManager.show(`Processamento interrompido. ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s).`, "warning");
-    } else {
-      AlertManager.show("Mapeamento concluído!", "success");
-    }
-  }
-
-  renderResultsTable() {
-    // Não precisa fazer nada aqui pois os resultados já são renderizados em tempo real
-  }
-
-  addResultsSummary(successCount, errorCount) {
-    const summaryRow = document.createElement("tr");
-    const summaryCell = document.createElement("td");
-    summaryCell.colSpan = 3;
-    summaryCell.className = "px-6 py-4 bg-blue-50 text-sm font-semibold text-gray-800 sticky bottom-0 z-10 shadow-md border-t border-gray-200";
-    
-    const skipped = this.state.fileData.length - (successCount + errorCount);
-    if (skipped > 0) {
-      summaryCell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s)`;
-    } else {
-      summaryCell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s)`;
-    }
-    
-    summaryRow.appendChild(summaryCell);
-    DOM_ELEMENTS.resultsBody.appendChild(summaryRow);
+  addResultsSummary(successCount, errorCount, skipped = 0) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 3;
+    cell.className = "px-6 py-4 bg-blue-50 text-sm font-semibold text-gray-800";
+    cell.textContent = `Resumo: ${successCount} sucesso(s), ${errorCount} erro(s), ${skipped} cancelado(s)`;
+    row.appendChild(cell);
+    DOM_ELEMENTS.resultsBody.appendChild(row);
   }
 
   downloadReport() {
@@ -479,7 +508,7 @@ export class BluesoftIntegrationApp {
 
     this.state.processingResults.forEach((result) => {
       const status = result.status === "success" ? "Sucesso" : "Erro";
-      const message = result.message.replace(/"/g, '""');
+      const message = (/^(?:\s*[=+@-]|[\t\r])/.test(result.message) ? "'" + result.message : result.message).replace(/"/g, '""');
       rows.push(`${result.subFinalizadoraKey},${status},"${message}"`);
     });
 
@@ -502,7 +531,7 @@ export class BluesoftIntegrationApp {
   async handleManualSubmit(event) {
     event.preventDefault();
 
-    if (!this.validateCredentials()) return;
+    if (this.busy || !this.validateCredentials()) return;
 
     const formData = this.collectManualFormData();
     const validation = DataValidator.validateSubmissionData(formData);
@@ -512,7 +541,7 @@ export class BluesoftIntegrationApp {
       return;
     }
 
-    await this.submitManualForm(formData);
+    await this.analyzeImport([formData], "Manual");
   }
 
   collectManualFormData() {
@@ -520,26 +549,9 @@ export class BluesoftIntegrationApp {
       tipoTef: DOM_ELEMENTS.manualTipoTef.value,
       codigoBandeira: DataProcessor.parseStrictInt(DOM_ELEMENTS.manualCodigoBandeira.value),
       tipoCartao: DOM_ELEMENTS.manualTipoCartao.value,
-      codigoAdministradora: DOM_ELEMENTS.manualCodigoAdministradora.value,
+      codigoAdministradora: DOM_ELEMENTS.manualCodigoAdministradora.value.trim(),
       subFinalizadoraKey: DataProcessor.parseStrictInt(DOM_ELEMENTS.manualSubFinalizadoraKey.value),
     };
-  }
-
-  async submitManualForm(formData) {
-    const tenant = StorageManager.get("bluesoftTenant");
-    const token = StorageManager.get("bluesoftToken");
-
-    try {
-      await ApiService.sendData(tenant, token, formData);
-      this.showManualResult("Dados enviados com sucesso!", true);
-      this.state.addHistoryItem("Manual", formData, true);
-      DOM_ELEMENTS.manualForm.reset();
-    } catch (error) {
-      this.showManualResult(`Erro ao enviar: ${error.message}`, false);
-      this.state.addHistoryItem("Manual", formData, false, error.message);
-    } finally {
-      this.renderHistory();
-    }
   }
 
   showManualResult(message, isSuccess) {
