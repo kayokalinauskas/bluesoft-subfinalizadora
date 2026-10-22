@@ -63,9 +63,58 @@ test('análise exibe diferenças; somente a confirmação dispara PUT', async ()
   assert.match(controls.reviewBody.textContent, /099 → 108/);
   await app.confirmReview();
   assert.deepEqual(calls, ['GET', 'GET', 'PUT']);
-  assert.match(controls.manualResultMessage.textContent, /1 sucesso/);
+  assert.match(controls.reviewSummary.textContent, /1 sucesso/);
   assert.equal(app.state.history[0].success, true);
   assert.equal(controls.confirmReviewBtn.disabled, true);
+  assert.equal(controls.integrationFlow.parentElement, controls.manualWorkflowHost);
+  assert.equal(controls.resultsSection.closest('.tab-content').id, 'manual-tab');
+  assert.equal(controls.manualResults.classList.contains('hidden'), true);
+});
+
+test('validação mostra progresso no mesmo painel antes de liberar o envio', async () => {
+  let release;
+  api.fetchImpl = () => new Promise(resolve => { release = () => resolve(Response.json(page([]))); });
+  const panel = controls.integrationFlow;
+  const pending = app.analyzeImport([data], 'Arquivo');
+  assert.equal(panel.parentElement, controls.uploadWorkflowHost);
+  assert.equal(panel.dataset.stage, 'analyzing');
+  assert.equal(controls.progressTrack.classList.contains('indeterminate'), true);
+  assert.equal(controls.progressTrack.hasAttribute('aria-valuenow'), false);
+  assert.equal(controls.confirmReviewBtn.classList.contains('hidden'), true);
+  assert.equal(controls.workflowContent.getAttribute('aria-busy'), 'true');
+  release();
+  await pending;
+  assert.equal(controls.integrationFlow, panel);
+  assert.equal(panel.dataset.stage, 'review');
+  assert.equal(controls.confirmReviewBtn.classList.contains('hidden'), false);
+  assert.match(controls.confirmReviewBtn.textContent, /Enviar 1 registro/);
+  assert.equal(controls.filePreview.classList.contains('hidden'), true);
+  assert.equal(controls.progressTrack.getAttribute('aria-valuenow'), '100');
+});
+
+test('envio atualiza as linhas no mesmo painel e mantém resultado e relatório acessíveis', async () => {
+  responses([page([])]);
+  await app.analyzeImport([data], 'Arquivo');
+  let release;
+  api.fetchImpl = async (_, options) => options.method === 'GET' ? Response.json(page([]))
+    : new Promise(resolve => { release = () => resolve(new Response(null, { status: 201 })); });
+  const pending = app.confirmReview();
+  await new Promise(setImmediate);
+  const row = controls.resultsBody.firstElementChild;
+  assert.equal(controls.integrationFlow.dataset.stage, 'sending');
+  assert.equal(row.dataset.status, 'processing');
+  assert.match(row.textContent, /Em andamento/);
+  assert.equal(controls.resultsSection.classList.contains('hidden'), false);
+  assert.equal(controls.confirmReviewBtn.classList.contains('hidden'), true);
+  release();
+  await pending;
+  assert.equal(controls.resultsBody.firstElementChild, row);
+  assert.equal(row.dataset.status, 'success');
+  assert.equal(controls.integrationFlow.dataset.stage, 'complete');
+  assert.equal(controls.integrationFlow.parentElement, controls.uploadWorkflowHost);
+  assert.equal(controls.processingSection.classList.contains('hidden'), false);
+  assert.equal(controls.downloadReportBtn.classList.contains('hidden'), false);
+  assert.equal(controls.progressTrack.getAttribute('aria-valuenow'), '100');
 });
 
 test('lote compartilha consultas e mostra todas as subfinalizadoras afetadas', async () => {
@@ -118,7 +167,7 @@ test('subfinalizadoras repetidas no lote são bloqueadas antes da consulta', asy
   await app.analyzeImport([data, { ...data, codigoBandeira: 99 }], 'Arquivo');
   assert.deepEqual(calls, []);
   assert.equal(app.review, null);
-  assert.match(messages.join(' '), /repetidas/);
+  assert.match(controls.reviewSummary.textContent, /repetidas/);
 });
 
 test('alterar dados manuais ou credenciais descarta a revisão', async () => {
@@ -159,8 +208,35 @@ test('cancelamento preserva resultado atual e impede os próximos itens', async 
   await app.analyzeImport([data, second], 'Arquivo');
   await app.confirmReview();
   assert.deepEqual(calls, ['GET', 'GET', 'POST']);
-  assert.equal(app.state.processingResults.length, 1);
+  assert.equal(app.state.processingResults.length, 2);
   assert.match(controls.reviewSummary.textContent, /1 cancelado/);
+  assert.equal(controls.integrationFlow.dataset.stage, 'interrupted');
+  assert.deepEqual([...controls.resultsBody.children].map(row => row.dataset.status), ['success', 'cancelled']);
+  assert.match(controls.resultsBody.textContent, /Não enviado/);
+  assert.match(app.generateReportCSV(), /999,Não enviado/);
+});
+
+test('erro de gravação fica na linha e não provoca mudança de aba', async () => {
+  app.switchTab('upload', document.querySelector('[data-tab="upload"]'));
+  responses([page([]), page([]), Response.json({ detail: 'Regra de negócio rejeitada' }, { status: 422 })]);
+  await app.analyzeImport([data], 'Arquivo');
+  await app.confirmReview();
+  assert.equal(controls.integrationFlow.dataset.stage, 'failed');
+  assert.match(controls.workflowState.textContent, /Concluído com erros/);
+  assert.match(controls.resultsBody.textContent, /Regra de negócio rejeitada/);
+  assert.equal(document.querySelector('.tab-content.active').id, 'upload-tab');
+});
+
+test('voltar da revisão restaura os dados do arquivo no mesmo painel', async () => {
+  app.state.fileData = [data];
+  responses([page([])]);
+  await app.analyzeImport([data], 'Arquivo');
+  controls.discardReviewBtn.click();
+  assert.equal(app.review, null);
+  assert.equal(controls.integrationFlow.dataset.stage, 'ready');
+  assert.equal(controls.filePreview.classList.contains('hidden'), false);
+  assert.equal(controls.resultsSection.classList.contains('hidden'), true);
+  assert.equal(controls.processFileBtn.classList.contains('hidden'), false);
 });
 
 test('falha no histórico não transforma sucesso da API em erro ou nova gravação', async () => {

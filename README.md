@@ -121,9 +121,11 @@ O build é publicado automaticamente no GitHub Pages via GitHub Actions a cada p
 Use Node.js 24. As duas aplicações precisam ser publicadas: este frontend e o proxy do repositório `nodejs-serverless-function-express`.
 
 1. Salve tenant e token. A importação sempre atualiza mapas diferentes, cria os ausentes e preserva os idênticos.
-2. Carregue o arquivo e clique em **Analisar importação**, ou preencha o formulário manual e clique em **Analisar dados**. A análise apenas consulta o ERP (permissão 4301).
+2. Carregue o arquivo e clique em **Validar importação**, ou preencha o formulário manual e clique em **Analisar dados**. A análise apenas consulta o ERP (permissão 4301).
 3. Confira a revisão: criar, manter sem alterações ou atualizar, com ID do mapa e diferenças campo a campo.
-4. Clique em **Confirmar envio**. Inclusões exigem permissão 4302; atualizações, 4303.
+4. No mesmo painel, clique em **Enviar … registros para o ERP** e acompanhe o progresso e o resultado por linha. Inclusões exigem permissão 4302; atualizações, 4303.
+
+Prévia, validação, confirmação e resultados ocupam a mesma área na aba de importação, sem rolagem automática ou troca de aba. A tabela mantém a ordem dos registros durante o envio; no celular, alterações e resultados aparecem como cartões. Ao final, o relatório também inclui os registros não enviados por cancelamento. O envio manual usa o mesmo painel dentro da própria aba.
 
 Mapas idênticos não são reenviados. Atualizações usam o ID do mapa retornado pelo ERP, nunca a chave da subfinalizadora como ID. O PUT não cria mapas: esse comportamento foi testado no beta e retorna 404 para ID inexistente; inclusões usam POST. Consultas ambíguas ou inconsistentes bloqueiam o lote; não há tentativa automática de PUT depois de um POST com erro. Corrija linhas inválidas ou repetidas e analise novamente. Cancelar interrompe os próximos envios e aguarda os que estão em andamento; não reverte os já gravados.
 
