@@ -4,7 +4,7 @@ import { AlertManager } from "./ui/alerts.js";
 import { DataValidator } from "./processors/validator.js";
 import { DataProcessor } from "./processors/dataProcessor.js";
 import { ApiService } from "./services/api.js";
-import { mappingOriginKey } from "./services/mappingApi.js";
+import { mappingOriginKey, ORIGIN_FIELDS } from "./services/mappingApi.js";
 import { AppState } from "./state.js";
 
 export class BluesoftIntegrationApp {
@@ -471,10 +471,11 @@ export class BluesoftIntegrationApp {
       const changes = candidate.differences.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${candidate.data[field]} → ${entry.data[field]}`).join("; ");
       return `Mapa ${candidate.id} · Subfinalizadora ${candidate.data.subFinalizadoraKey}: ${changes || "dados idênticos à linha importada"}`;
     }).join(" | ");
-    const details = entry.error ? `${entry.error}${candidateDetails ? " Candidatos: " + candidateDetails : ""}` : (plan?.action === "create"
-      ? BluesoftIntegrationApp.PREVIEW_FIELDS.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${entry.data[field]}`).join("; ")
+    const origin = ORIGIN_FIELDS.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${entry.data[field]}`).join("; ");
+    const outcome = entry.error ? `${entry.error}${candidateDetails ? " Candidatos: " + candidateDetails : ""}` : (plan?.action === "create"
+      ? "Novo mapa para a subfinalizadora informada."
       : differences || "Os dados já são idênticos; nenhuma gravação será feita.");
-    for (const [index, text] of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? entry.candidates?.map(candidate => candidate.id).join(", ") ?? "—", details].entries()) {
+    for (const [index, text] of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? entry.candidates?.map(candidate => candidate.id).join(", ") ?? "—", `Origem: ${origin}. ${outcome}`].entries()) {
       const cell = document.createElement("td");
       cell.dataset.label = ["Subfinalizadora", "Ação", "Mapa no ERP", "Dados e diferenças"][index];
       cell.className = "px-4 py-3 text-sm text-gray-800 border-b border-gray-100";

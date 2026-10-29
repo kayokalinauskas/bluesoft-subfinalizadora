@@ -344,3 +344,43 @@ test('origem duplicada surgida na reconsulta impede todas as gravações', async
   await assert.rejects(api.execute('tenant', 'dummy', plan), /mudou desde/);
   assert.ok(calls.every(call => call.method === 'GET'));
 });
+
+test('mapa legado inválido de outra origem não bloqueia análise nem revalidação do lote', async () => {
+  const other = { ...data, codigoBandeira: 13, subFinalizadoraKey: 5027 };
+  const unrelated = { ...existing, mapaSubfinalizadoraTefKey: 88, codigoBandeira: 99, tipoCartao: 'LEGADO', subFinalizadoraKey: null };
+  const inventory = page([existing, unrelated]);
+  const { api, calls } = mock([inventory, inventory, new Response(null, { status: 201 })]);
+  const entries = await api.planBatch('tenant', 'dummy', [data, other]);
+  assert.deepEqual(entries.map(entry => entry.plan.action), ['unchanged', 'create']);
+  const results = await api.executeBatch('tenant', 'dummy', entries.map(entry => entry.plan));
+  assert.ok(results.every(result => result.status === 'success'));
+  assert.deepEqual(calls.map(call => call.method), ['GET', 'GET', 'POST']);
+});
+
+test('destino inválido de uma origem relevante bloqueia a linha afetada, sem propor inclusão', async () => {
+  const other = { ...data, codigoBandeira: 13, subFinalizadoraKey: 5027 };
+  const { api, calls } = mock([page([{ ...existing, subFinalizadoraKey: null }])]);
+  const entries = await api.planBatch('tenant', 'dummy', [data, other]);
+  assert.match(entries[0].error, /mapa 77/);
+  assert.equal(entries[0].plan, undefined);
+  assert.equal(entries[1].plan.action, 'create');
+  assert.deepEqual(calls.map(call => call.method), ['GET']);
+});
+
+test('origem incompleta não é interpretada como ausência se os campos conhecidos coincidirem', async () => {
+  const other = { ...data, codigoBandeira: 13, subFinalizadoraKey: 5027 };
+  for (const change of [{ tipoTef: null }, { codigoAdministradora: null }, { tipoCartao: 'LEGADO' }, { codigoBandeira: null }]) {
+    const { api } = mock([page([{ ...existing, ...change }])]);
+    const entries = await api.planBatch('tenant', 'dummy', [data, other]);
+    assert.match(entries[0].error, /origem incompletos\/inválidos/);
+    assert.equal(entries[0].plan, undefined);
+    if (change.codigoBandeira === null) assert.equal(entries[1].plan, undefined);
+    else assert.equal(entries[1].plan.action, 'create');
+  }
+});
+
+test('mapa sem nenhum campo confiável de origem bloqueia todas as correspondências possíveis', async () => {
+  const { api } = mock([page([{ mapaSubfinalizadoraTefKey: 88 }])]);
+  const entries = await api.planBatch('tenant', 'dummy', [data, { ...data, codigoBandeira: 13 }]);
+  assert.ok(entries.every(entry => entry.error && !entry.plan));
+});

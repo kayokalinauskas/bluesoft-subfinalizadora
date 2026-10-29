@@ -364,3 +364,34 @@ test('origens de um mesmo destino ficam identificadas na tela e no CSV', async (
   assert.match(csv, /"SITEF","108","12","CARTAO_CREDITO"/);
   assert.match(csv, /"SITEF","'=1","12","CARTAO_CREDITO"/);
 });
+
+test('revisão identifica as duas origens antes de confirmar atualizações para o mesmo destino', async () => {
+  const other = { ...data, codigoAdministradora: '099' };
+  const calls = responses([page([
+    { ...existing, subFinalizadoraKey: 601 },
+    { ...other, subFinalizadoraKey: 601, mapaSubfinalizadoraTefKey: 78 },
+  ])]);
+  await app.analyzeImport([data, other], 'Arquivo');
+  const [first, second] = [...controls.reviewBody.children];
+  assert.match(first.textContent, /108/);
+  assert.match(second.textContent, /099/);
+  for (const row of [first, second]) {
+    assert.match(row.textContent, /SITEF/);
+    assert.match(row.textContent, /12/);
+    assert.match(row.textContent, /CARTAO_CREDITO/);
+    assert.match(row.textContent, /601 → 5026/);
+  }
+  assert.equal(first.children[2].textContent, '77');
+  assert.equal(second.children[2].textContent, '78');
+  assert.equal(controls.confirmReviewBtn.disabled, false);
+  assert.deepEqual(calls, ['GET']);
+});
+
+test('origem relevante inválida é exibida como bloqueio e impede qualquer escrita do lote', async () => {
+  const calls = responses([page([{ ...existing, subFinalizadoraKey: null }])]);
+  await app.analyzeImport([data, { ...data, codigoBandeira: 13 }], 'Arquivo');
+  assert.match(controls.reviewBody.textContent, /mapa 77/);
+  assert.equal(controls.confirmReviewBtn.disabled, true);
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET']);
+});
