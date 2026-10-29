@@ -32,3 +32,8 @@ Um PUT no ID ausente 201 retornou 404, com a mensagem de mapa não encontrado, e
 Os 45 testes automatizados cobrem o lote misto de 31 linhas, apenas duas leituras compartilhadas entre análise e confirmação, preservação de idênticos, paginação com tamanho reduzido pelo ERP, IDs corretos no PUT, ambiguidades, bloqueio de todo o lote se o último registro mudou, erros por item e ausência de tentativas automáticas. Testes com oito gravações controladas verificam paralelismo real e limite de quatro requisições em andamento; o cancelamento aguarda essas quatro e impede as demais.
 
 Não há transação ou escrita condicional no contrato utilizado. A revalidação reduz o risco de revisão desatualizada, mas não elimina alterações concorrentes no ERP entre consulta e gravação. O relatório registra o resultado individual; cancelar não desfaz gravações concluídas ou em andamento. Dados e tokens não são armazenados em cache pelo serviço.
+
+
+## Nota de escopo — correção da identidade do mapa em 29/10/2026
+
+As medições e escritas descritas acima são evidências históricas da implementação anterior, que agrupava por subfinalizadora. Não homologam a nova conciliação por origem. O fluxo atual usa TEF + administradora/rede + bandeira + cartão para localizar candidatos; a subfinalizadora é o destino. Alterar apenas a administradora passa a representar outra origem, e não a atualização automática do mapa anterior. O envio manual filtra por bandeira/cartão e compara os demais campos localmente, sem filtro por destino. A correção foi validada por testes simulados de serviço e interface; não foram realizadas novas escritas no ERP nesta etapa.

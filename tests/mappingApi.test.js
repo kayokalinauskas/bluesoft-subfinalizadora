@@ -23,7 +23,9 @@ test('planejar não grava; confirmar cria apenas após nova consulta', async () 
   const plan = await api.plan('tenant', 'dummy', data);
   assert.equal(plan.action, 'create');
   assert.deepEqual(calls.map(c => c.method), ['GET']);
-  assert.equal(calls[0].target.searchParams.get('subFinalizadoraKey'), '5026');
+  assert.equal(calls[0].target.searchParams.has('subFinalizadoraKey'), false);
+  assert.equal(calls[0].target.searchParams.get('codigoBandeira'), '12');
+  assert.equal(calls[0].target.searchParams.get('tipoCartao'), data.tipoCartao);
   assert.equal(calls[0].target.searchParams.get('currentPage'), '0');
   assert.equal(await api.execute('tenant', 'dummy', plan), 'create');
   assert.deepEqual(calls.map(c => c.method), ['GET', 'GET', 'POST']);
@@ -38,19 +40,19 @@ test('mapa idêntico é preservado sem POST nem PUT', async () => {
 });
 
 test('PUT usa a chave do mapa, nunca a chave da subfinalizadora', async () => {
-  const old = { ...existing, codigoAdministradora: '099' };
+  const old = { ...existing, subFinalizadoraKey: 99 };
   const { api, calls } = mock([page([old]), page([old]), new Response(null, { status: 204 })]);
   const plan = await api.plan('tenant', 'dummy', data);
-  assert.deepEqual(plan.differences, ['codigoAdministradora']);
+  assert.deepEqual(plan.differences, ['subFinalizadoraKey']);
   assert.equal(await api.execute('tenant', 'dummy', plan), 'update');
   assert.equal(calls[2].method, 'PUT');
   assert.ok(calls[2].target.pathname.endsWith('/77'));
   assert.deepEqual(JSON.parse(calls[2].body), data);
 });
 
-test('atualização de dados diferentes é automática na análise', async () => {
+test('outra bandeira é outra origem e não altera mapa do mesmo destino', async () => {
   const { api, calls } = mock([page([{ ...existing, codigoBandeira: 1 }])]);
-  assert.equal((await api.plan('tenant', 'dummy', data)).action, 'update');
+  assert.equal((await api.plan('tenant', 'dummy', data)).action, 'create');
   assert.equal(calls.length, 1);
 });
 
@@ -79,7 +81,7 @@ test('consulta vazia com uma página declarada é aceita', async () => {
 test('respostas inválidas nunca são interpretadas como ausência', async () => {
   const invalidResponses = [
     [{ unexpected: [] }], [null], [page([{ ...data }])],
-    [[existing], [existing]], [page([{ ...existing, subFinalizadoraKey: 999 }])],
+    [[existing], [existing]],
     [{ content: [], totalPages: 3 }], [{ content: [existing], totalPages: 0 }],
     [{ content: [existing], totalPages: 2 }, { content: [], totalPages: 1 }],
     [page([{ ...existing, mapaSubfinalizadoraTefKey: 2147483648 }])],
@@ -93,8 +95,8 @@ test('respostas inválidas nunca são interpretadas como ausência', async () =>
 });
 
 test('mudança entre revisão e execução bloqueia a gravação', async () => {
-  const previous = { ...existing, codigoAdministradora: '099' };
-  const { api, calls } = mock([page([previous]), page([{ ...previous, codigoAdministradora: '100' }])]);
+  const previous = { ...existing, subFinalizadoraKey: 99 };
+  const { api, calls } = mock([page([previous]), page([{ ...previous, subFinalizadoraKey: 100 }])]);
   const plan = await api.plan('tenant', 'dummy', data);
   await assert.rejects(api.execute('tenant', 'dummy', plan), /mudou desde/);
   assert.ok(calls.every(call => call.method === 'GET'));
@@ -160,16 +162,17 @@ test('sucesso sem JSON não é transformado em falha de gravação', async () =>
   assert.equal(await api.request('tenant', 'dummy', 'PUT', '/77', data), null);
 });
 
-test('zeros à esquerda da administradora são preservados e identificados como diferença', async () => {
+test('zeros à esquerda da administradora distinguem origens e são preservados', async () => {
   const { api } = mock([page([{ ...existing, codigoAdministradora: '008' }])]);
   const plan = await api.plan('tenant', 'dummy', { ...data, codigoAdministradora: '8' });
-  assert.deepEqual(plan.differences, ['codigoAdministradora']);
-  assert.equal(plan.existing.codigoAdministradora, '008');
+  assert.equal(plan.action, 'create');
+  assert.equal(plan.existing, null);
+  assert.equal(plan.data.codigoAdministradora, '8');
 });
 
 test('lote misto é conciliado e uma segunda importação não grava novamente', async () => {
-  const payloads = Array.from({ length: 31 }, (_, index) => ({ ...data, subFinalizadoraKey: 5000 + index }));
-  const records = new Map(payloads.slice(0, 20).map((value, index) => [value.subFinalizadoraKey, { ...value, codigoAdministradora: index < 10 ? value.codigoAdministradora : '099', mapaSubfinalizadoraTefKey: 100 + index }]));
+  const payloads = Array.from({ length: 31 }, (_, index) => ({ ...data, codigoBandeira: 12 + index, subFinalizadoraKey: 5000 + index }));
+  const records = new Map(payloads.slice(0, 20).map((value, index) => [value.subFinalizadoraKey, { ...value, subFinalizadoraKey: index < 10 ? value.subFinalizadoraKey : 8000 + index, mapaSubfinalizadoraTefKey: 100 + index }]));
   const writes = [];
   let reads = 0;
   const api = new MappingApi('https://proxy.example', async (url, options) => {
@@ -222,19 +225,19 @@ test('envelope data com página incorreta bloqueia envio', async () => {
 });
 
 test('paginação usa o tamanho efetivo do ERP e inclui mapas das páginas seguintes', async () => {
-  const second = { ...existing, mapaSubfinalizadoraTefKey: 78, subFinalizadoraKey: 5027 };
-  const third = { ...existing, mapaSubfinalizadoraTefKey: 79, subFinalizadoraKey: 5028 };
+  const second = { ...existing, mapaSubfinalizadoraTefKey: 78, codigoBandeira: 13, subFinalizadoraKey: 5027 };
+  const third = { ...existing, mapaSubfinalizadoraTefKey: 79, codigoBandeira: 14, subFinalizadoraKey: 5028 };
   const { api, calls } = mock([
     { currentPage: 0, pageSize: 2, data: [existing, second] },
     { currentPage: 1, pageSize: 2, data: [third] },
   ]);
-  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, subFinalizadoraKey: 5028 }]);
+  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, codigoBandeira: 14, subFinalizadoraKey: 5028 }]);
   assert.deepEqual(entries.map(entry => entry.plan.id), [77, 79]);
   assert.equal(calls.length, 2);
 });
 
 test('mudança no último item bloqueia o lote inteiro antes da primeira escrita', async () => {
-  const second = { ...data, subFinalizadoraKey: 999 };
+  const second = { ...data, codigoBandeira: 99, subFinalizadoraKey: 999 };
   const { api, calls } = mock([page([]), page([{ ...second, mapaSubfinalizadoraTefKey: 78 }])]);
   const entries = await api.planBatch('beta', 'dummy', [data, second]);
   await assert.rejects(api.executeBatch('beta', 'dummy', entries.map(entry => entry.plan)), /999 mudou desde/);
@@ -243,13 +246,13 @@ test('mudança no último item bloqueia o lote inteiro antes da primeira escrita
 
 test('ambiguidade em inventário compartilhado identifica somente a subfinalizadora afetada', async () => {
   const { api } = mock([page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78 }])]);
-  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, subFinalizadoraKey: 999 }]);
+  const entries = await api.planBatch('beta', 'dummy', [data, { ...data, codigoBandeira: 99, subFinalizadoraKey: 999 }]);
   assert.match(entries[0].error, /Mais de um/);
   assert.equal(entries[1].plan.action, 'create');
 });
 
 for (const cancel of [false, true]) test(`gravações têm no máximo quatro requisições simultâneas; cancelamento=${cancel}`, async () => {
-  const payloads = Array.from({ length: 8 }, (_, i) => ({ ...data, subFinalizadoraKey: 9000 + i }));
+  const payloads = Array.from({ length: 8 }, (_, i) => ({ ...data, codigoBandeira: 12 + i, subFinalizadoraKey: 9000 + i }));
   const pending = [];
   let active = 0, maximum = 0, writes = 0, cancelled = false;
   const completed = [];
@@ -282,4 +285,62 @@ for (const cancel of [false, true]) test(`gravações têm no máximo quatro req
   assert.equal(writes, cancel ? 4 : 8);
   assert.equal(completed.length, writes);
   assert.deepEqual(results.map(result => result.subFinalizadoraKey), payloads.slice(0, writes).map(item => item.subFinalizadoraKey));
+});
+
+for (const change of [
+  { tipoTef: 'POS' }, { codigoAdministradora: '099' },
+  { codigoBandeira: 99 }, { tipoCartao: 'CARTAO_DEBITO' },
+]) test(`mesmo destino com outra origem não bloqueia o mapa correto: ${JSON.stringify(change)}`, async () => {
+  const other = { ...existing, ...change, mapaSubfinalizadoraTefKey: 78 };
+  const { api } = mock([page([other, existing])]);
+  const plan = await api.plan('tenant', 'dummy', data);
+  assert.equal(plan.action, 'unchanged');
+  assert.equal(plan.id, 77);
+});
+
+test('origem vinculada a outro destino é localizada entre páginas e atualizada por ID', async () => {
+  const previous = { ...existing, subFinalizadoraKey: 601 };
+  const first = { ...existing, codigoAdministradora: '099', mapaSubfinalizadoraTefKey: 78 };
+  const inventory = [{ content: [first], totalPages: 2 }, { content: [previous], totalPages: 2 }];
+  const { api, calls } = mock([...inventory, ...inventory, new Response(null, { status: 204 })]);
+  const plan = await api.plan('tenant', 'dummy', data);
+  assert.equal(plan.action, 'update');
+  assert.equal(plan.id, 77);
+  assert.equal(plan.existing.subFinalizadoraKey, 601);
+  assert.deepEqual(plan.differences, ['subFinalizadoraKey']);
+  assert.equal(await api.execute('tenant', 'dummy', plan), 'update');
+  assert.equal(calls.at(-1).target.pathname.split('/').at(-1), '77');
+  assert.equal(calls.at(-1).method, 'PUT');
+  assert.ok(calls.every(call => !call.target.searchParams.has('subFinalizadoraKey')));
+});
+
+test('nenhuma origem correspondente cria mesmo quando o destino já tem outros mapas', async () => {
+  const { api } = mock([page([{ ...existing, codigoAdministradora: '099' }, { ...existing, tipoTef: 'POS', mapaSubfinalizadoraTefKey: 78 }])]);
+  assert.equal((await api.plan('tenant', 'dummy', data)).action, 'create');
+});
+
+test('ambiguidade da mesma origem preserva IDs, destinos e diferenças de todos os candidatos', async () => {
+  const { api } = mock([page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78, subFinalizadoraKey: 601 }])]);
+  const [entry] = await api.planBatch('tenant', 'dummy', [data]);
+  assert.match(entry.error, /mesma combinação/);
+  assert.deepEqual(entry.candidates.map(candidate => candidate.id), [77, 78]);
+  assert.deepEqual(entry.candidates.map(candidate => candidate.differences), [[], ['subFinalizadoraKey']]);
+  assert.deepEqual(entry.candidates.map(candidate => candidate.data.subFinalizadoraKey), [5026, 601]);
+});
+
+test('duas origens com mesmo destino são aceitas no lote; origem repetida não faz GET', async () => {
+  const other = { ...data, codigoAdministradora: '099' };
+  const { api, calls } = mock([page([])]);
+  const entries = await api.planBatch('tenant', 'dummy', [data, other]);
+  assert.ok(entries.every(entry => entry.plan.action === 'create'));
+  const before = calls.length;
+  await assert.rejects(api.planBatch('tenant', 'dummy', [data, { ...data, subFinalizadoraKey: 601 }]), /origem repetidas/);
+  assert.equal(calls.length, before);
+});
+
+test('origem duplicada surgida na reconsulta impede todas as gravações', async () => {
+  const { api, calls } = mock([page([existing]), page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78, subFinalizadoraKey: 601 }])]);
+  const plan = await api.plan('tenant', 'dummy', data);
+  await assert.rejects(api.execute('tenant', 'dummy', plan), /mudou desde/);
+  assert.ok(calls.every(call => call.method === 'GET'));
 });
