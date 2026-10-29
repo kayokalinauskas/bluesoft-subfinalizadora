@@ -4,6 +4,7 @@ import { AlertManager } from "./ui/alerts.js";
 import { DataValidator } from "./processors/validator.js";
 import { DataProcessor } from "./processors/dataProcessor.js";
 import { ApiService } from "./services/api.js";
+import { mappingOriginKey, ORIGIN_FIELDS } from "./services/mappingApi.js";
 import { AppState } from "./state.js";
 
 export class BluesoftIntegrationApp {
@@ -408,14 +409,13 @@ export class BluesoftIntegrationApp {
   async analyzeImport(payloads, source) {
     if (this.busy || !payloads.length) return;
     this.invalidateReview();
-    const duplicateKeys = payloads.length !== new Set(payloads.map(data => data.subFinalizadoraKey)).size;
-    if (duplicateKeys) {
-      this.showWorkflowBlock("Há subfinalizadoras repetidas no lote. Corrija a planilha antes de analisar.", source);
-      return;
-    }
     const invalid = payloads.find(data => !DataValidator.validateSubmissionData(data).isValid);
     if (invalid) {
       this.showWorkflowBlock(DataValidator.validateSubmissionData(invalid).errors.join("; "), source);
+      return;
+    }
+    if (payloads.length !== new Set(payloads.map(mappingOriginKey)).size) {
+      this.showWorkflowBlock("Há combinações de origem repetidas no lote (TEF, administradora, bandeira e cartão), inclusive com destinos diferentes. Corrija a planilha antes de analisar.", source);
       return;
     }
     const tenant = StorageManager.get("bluesoftTenant");
@@ -467,10 +467,15 @@ export class BluesoftIntegrationApp {
     const plan = entry.plan;
     const labels = { create: "Criar", update: "Atualizar", unchanged: "Manter sem alterações" };
     const differences = plan?.differences.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${plan.existing[field]} → ${plan.data[field]}`).join("; ");
-    const details = entry.error || (plan?.action === "create"
-      ? BluesoftIntegrationApp.PREVIEW_FIELDS.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${entry.data[field]}`).join("; ")
+    const candidateDetails = entry.candidates?.map(candidate => {
+      const changes = candidate.differences.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${candidate.data[field]} → ${entry.data[field]}`).join("; ");
+      return `Mapa ${candidate.id} · Subfinalizadora ${candidate.data.subFinalizadoraKey}: ${changes || "dados idênticos à linha importada"}`;
+    }).join(" | ");
+    const origin = ORIGIN_FIELDS.map(field => `${BluesoftIntegrationApp.FIELD_LABELS[field]}: ${entry.data[field]}`).join("; ");
+    const outcome = entry.error ? `${entry.error}${candidateDetails ? " Candidatos: " + candidateDetails : ""}` : (plan?.action === "create"
+      ? "Novo mapa para a subfinalizadora informada."
       : differences || "Os dados já são idênticos; nenhuma gravação será feita.");
-    for (const [index, text] of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? "—", details].entries()) {
+    for (const [index, text] of [entry.data.subFinalizadoraKey, plan ? labels[plan.action] : "Bloqueado", plan?.id ?? entry.candidates?.map(candidate => candidate.id).join(", ") ?? "—", `Origem: ${origin}. ${outcome}`].entries()) {
       const cell = document.createElement("td");
       cell.dataset.label = ["Subfinalizadora", "Ação", "Mapa no ERP", "Dados e diferenças"][index];
       cell.className = "px-4 py-3 text-sm text-gray-800 border-b border-gray-100";
@@ -503,7 +508,7 @@ export class BluesoftIntegrationApp {
     DOM_ELEMENTS.cancelProcessingBtn.textContent = "Cancelar próximos envios";
     DOM_ELEMENTS.resultsBody.replaceChildren();
     this.resultRows.clear();
-    for (const entry of review.entries) this.appendRealtimeResultRow({ subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "pending", message: "Aguardando conferência do lote" });
+    for (const [rowIndex, entry] of review.entries.entries()) this.appendRealtimeResultRow({ rowIndex, data: entry.data, subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "pending", message: "Aguardando conferência do lote" });
     this.setWorkflowStage("checking", "Conferindo o lote antes do envio. Acompanhe o resultado de cada registro abaixo.");
     let successes = 0;
     let errors = 0;
@@ -511,15 +516,17 @@ export class BluesoftIntegrationApp {
       await ApiService.executeBatch(review.tenant, review.token, review.entries.map(entry => entry.plan), {
         isCancelled: () => this.isCancelled,
         onProgress: ({ records }) => { DOM_ELEMENTS.progressText.textContent = `Conferindo o lote: ${records} mapas consultados no ERP…`; },
-        onStart: plan => {
+        onStart: (plan, rowIndex) => {
           if (DOM_ELEMENTS.integrationFlow.dataset.stage === "checking") this.setWorkflowStage("sending");
-          this.appendRealtimeResultRow({ subFinalizadoraKey: plan.data.subFinalizadoraKey, status: "processing", message: {
+          this.appendRealtimeResultRow({ rowIndex, data: plan.data, subFinalizadoraKey: plan.data.subFinalizadoraKey, status: "processing", message: {
             create: "Criando mapa no ERP…", update: `Atualizando mapa ${plan.id}…`, unchanged: "Mantendo dados idênticos…",
           }[plan.action] });
         },
         onResult: (result, index) => {
           if (DOM_ELEMENTS.integrationFlow.dataset.stage === "checking") this.setWorkflowStage("sending");
           const entry = review.entries[index];
+          result.rowIndex = index;
+          result.data = entry.data;
           if (result.status === "success") {
             result.message = { create: "Criado com sucesso", update: "Atualizado com sucesso", unchanged: "Já existente e idêntico; mantido sem alterações" }[result.action];
             successes++;
@@ -535,10 +542,10 @@ export class BluesoftIntegrationApp {
         },
       });
       const skipped = review.entries.length - successes - errors;
-      for (const entry of review.entries) {
-        const row = this.resultRows.get(entry.data.subFinalizadoraKey);
+      for (const [rowIndex, entry] of review.entries.entries()) {
+        const row = this.resultRows.get(rowIndex);
         if (row?.dataset.status === "pending") {
-          const result = { subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "cancelled", message: "Não enviado: operação cancelada" };
+          const result = { rowIndex, data: entry.data, subFinalizadoraKey: entry.data.subFinalizadoraKey, status: "cancelled", message: "Não enviado: operação cancelada" };
           this.appendRealtimeResultRow(result);
           this.state.processingResults.push(result);
         }
@@ -558,10 +565,11 @@ export class BluesoftIntegrationApp {
   }
 
   appendRealtimeResultRow(result) {
-    let row = this.resultRows.get(result.subFinalizadoraKey);
+    const rowKey = result.rowIndex ?? result.subFinalizadoraKey;
+    let row = this.resultRows.get(rowKey);
     if (!row) {
       row = document.createElement("tr");
-      this.resultRows.set(result.subFinalizadoraKey, row);
+      this.resultRows.set(rowKey, row);
       DOM_ELEMENTS.resultsBody.appendChild(row);
     }
     row.replaceChildren();
@@ -572,6 +580,12 @@ export class BluesoftIntegrationApp {
     keyCell.dataset.label = "Subfinalizadora";
     keyCell.className = "px-6 py-4 whitespace-nowrap text-sm text-gray-800";
     keyCell.textContent = result.subFinalizadoraKey !== null && result.subFinalizadoraKey !== undefined ? result.subFinalizadoraKey : "—";
+    if (result.data) {
+      const origin = document.createElement("span");
+      origin.className = "block text-xs text-gray-500 mt-1 whitespace-normal";
+      origin.textContent = `TEF ${result.data.tipoTef} · Administradora ${result.data.codigoAdministradora} · Bandeira ${result.data.codigoBandeira} · ${result.data.tipoCartao}`;
+      keyCell.appendChild(origin);
+    }
     row.appendChild(keyCell);
 
     const statusCell = document.createElement("td");
@@ -602,12 +616,18 @@ export class BluesoftIntegrationApp {
   }
 
   generateReportCSV() {
-    const rows = ["Subfinalizadora,Status,Mensagem"];
+    const rows = ["Subfinalizadora,Status,Mensagem,Tipo TEF,Administradora,Bandeira,Tipo cartão"];
+    const csvText = value => {
+      const text = String(value ?? "");
+      const safe = /^(?:\s*[=+@-]|[\t\r])/.test(text) ? "'" + text : text;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
 
     this.state.processingResults.forEach((result) => {
       const status = result.status === "success" ? "Sucesso" : result.status === "cancelled" ? "Não enviado" : "Erro";
       const message = (/^(?:\s*[=+@-]|[\t\r])/.test(result.message) ? "'" + result.message : result.message).replace(/"/g, '""');
-      rows.push(`${result.subFinalizadoraKey},${status},"${message}"`);
+      const origin = ["tipoTef", "codigoAdministradora", "codigoBandeira", "tipoCartao"].map(field => csvText(result.data?.[field])).join(",");
+      rows.push(`${result.subFinalizadoraKey},${status},"${message}",${origin}`);
     });
 
     return rows.join("\n");

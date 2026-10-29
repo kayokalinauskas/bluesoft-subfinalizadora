@@ -23,3 +23,8 @@ A instalação congelada pelo lockfile, a auditoria (`npm run audit:security`), 
 ## Limites
 
 A reconsulta anterior à gravação não oferece atomicidade entre GET e PUT. O ERP precisa oferecer escrita condicional para eliminar essa janela. O contrato e a interface foram validados no beta; permissões, dados e regras de negócio podem variar nos demais tenants. A publicação do frontend e do proxy continua necessária para disponibilizar a correção aos usuários.
+
+
+## Nota de escopo — correção da identidade do mapa em 29/10/2026
+
+As medições e escritas descritas acima são evidências históricas da implementação anterior, que agrupava por subfinalizadora. Não homologam a nova conciliação por origem. O fluxo atual usa TEF + administradora/rede + bandeira + cartão para localizar candidatos; a subfinalizadora é o destino. Alterar apenas a administradora passa a representar outra origem, e não a atualização automática do mapa anterior. O envio manual filtra por bandeira/cartão e compara os demais campos localmente, sem filtro por destino. A correção foi validada por testes simulados de serviço e interface; não foram realizadas novas escritas no ERP nesta etapa.

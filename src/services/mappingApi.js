@@ -1,6 +1,21 @@
 import { DataValidator } from "../processors/validator.js";
 
 export const MAPPING_FIELDS = ["tipoTef", "codigoBandeira", "tipoCartao", "codigoAdministradora", "subFinalizadoraKey"];
+export const ORIGIN_FIELDS = ["tipoTef", "codigoAdministradora", "codigoBandeira", "tipoCartao"];
+
+// This is the ERP's functional lookup combination, not a database uniqueness constraint.
+export function mappingOriginKey(record) {
+  const normalized = normalizeMapping(record);
+  return JSON.stringify(ORIGIN_FIELDS.map(field => normalized[field]));
+}
+
+export class MappingConflictError extends Error {
+  constructor(candidates) {
+    super("Mais de um mapa encontrado para a mesma combinação de TEF, administradora, bandeira e cartão. Revise os candidatos no ERP; não é seguro escolher automaticamente.");
+    this.candidates = candidates;
+  }
+}
+
 const PAGE_SIZE = 1000;
 const MAX_PAGES = 1000;
 const TIMEOUT_MS = 25000;
@@ -23,7 +38,7 @@ function errorMessage(body) {
   return errorMessage(body.details) || body.detail || body.message || body.title || body.error || "";
 }
 
-function snapshot(record) {
+function normalizeMapping(record) {
   const result = Object.fromEntries(MAPPING_FIELDS.map(field => [field, record[field]]));
   if (typeof result.tipoTef === "string") result.tipoTef = result.tipoTef.trim().toUpperCase();
   for (const field of ["codigoBandeira", "subFinalizadoraKey"]) {
@@ -31,6 +46,11 @@ function snapshot(record) {
   }
   // O código da administradora é textual: zeros à esquerda são significativos.
   if (typeof result.codigoAdministradora === "number") result.codigoAdministradora = String(result.codigoAdministradora);
+  return result;
+}
+
+function snapshot(record) {
+  const result = normalizeMapping(record);
   if (!DataValidator.validateSubmissionData(result).isValid) throw new Error("A consulta retornou um mapa com dados inválidos. Revise no ERP.");
   return Object.freeze(result);
 }
@@ -78,14 +98,14 @@ export class MappingApi {
     }
   }
 
-  async readMappings(tenant, token, subFinalizadoraKey, { isCancelled = () => false, onProgress = () => {} } = {}) {
+  async readMappings(tenant, token, filters = {}, { isCancelled = () => false, onProgress = () => {} } = {}) {
     const records = [];
     const seen = new Set();
     let expectedPages;
     for (let currentPage = 0; currentPage < MAX_PAGES; currentPage++) {
       if (isCancelled()) throw new Error("Análise cancelada. Nenhum dado foi gravado.");
       const response = await this.request(tenant, token, "GET", "", undefined, {
-        ...(subFinalizadoraKey === undefined ? {} : { subFinalizadoraKey }), currentPage, pageSize: PAGE_SIZE,
+        ...filters, currentPage, pageSize: PAGE_SIZE,
       });
       const items = Array.isArray(response) ? response : response?.content ?? response?.items ?? response?.data;
       if (!Array.isArray(items)) throw new Error("Formato de consulta não reconhecido. Nenhum dado será gravado.");
@@ -101,7 +121,6 @@ export class MappingApi {
       expectedPages = totalPages;
       for (const record of items) {
         if (!record || typeof record !== "object") throw new Error("Mapa inválido na consulta ao ERP.");
-        if (subFinalizadoraKey !== undefined && Number(record.subFinalizadoraKey) !== subFinalizadoraKey) throw new Error("O ERP não respeitou o filtro de subfinalizadora. Revise a consulta antes de enviar.");
         const id = mapId(record.mapaSubfinalizadoraTefKey);
         if (seen.has(id)) throw new Error("A consulta retornou mapas repetidos. Revise a paginação no ERP.");
         seen.add(id);
@@ -124,7 +143,9 @@ export class MappingApi {
     const validation = DataValidator.validateSubmissionData(data);
     if (!validation.isValid) throw new Error(validation.errors.join("; "));
     const payload = snapshot(data);
-    if (candidates.length > 1) throw new Error("Mais de um mapa encontrado para esta subfinalizadora. Revise os registros no ERP; não é seguro escolher automaticamente.");
+    if (candidates.length > 1) throw new MappingConflictError(Object.freeze(candidates.map(candidate => Object.freeze({
+      ...candidate, differences: Object.freeze(MAPPING_FIELDS.filter(field => candidate.data[field] !== payload[field])),
+    }))));
     const existing = candidates[0]?.data ?? null;
     const differences = existing ? MAPPING_FIELDS.filter(field => existing[field] !== payload[field]) : [];
     const action = existing ? (differences.length ? "update" : "unchanged") : "create";
@@ -133,35 +154,56 @@ export class MappingApi {
 
   async planBatch(tenant, token, payloads, options) {
     if (!payloads.length) return [];
-    const wanted = new Set();
+    const wanted = new Map();
     for (const data of payloads) {
       const validation = DataValidator.validateSubmissionData(data);
       if (!validation.isValid) throw new Error(validation.errors.join("; "));
-      if (wanted.has(data.subFinalizadoraKey)) throw new Error("Há subfinalizadoras repetidas no lote.");
-      wanted.add(data.subFinalizadoraKey);
+      const key = mappingOriginKey(data);
+      if (wanted.has(key)) throw new Error("Há combinações de origem repetidas no lote (TEF, administradora, bandeira e cartão), inclusive com destinos diferentes.");
+      wanted.set(key, snapshot(data));
     }
-    // Um único inventário paginado por lote; nada é armazenado entre análises.
-    // Para um registro manual, usamos o filtro para evitar ler toda a coleção.
-    const records = await this.readMappings(tenant, token, payloads.length === 1 ? payloads[0].subFinalizadoraKey : undefined, options);
+    // Never filter by destination: the same origin may currently point elsewhere.
+    // For a single row, the API supports band/card filters; TEF/admin are matched locally.
+    const filters = payloads.length === 1 ? {
+      codigoBandeira: payloads[0].codigoBandeira, tipoCartao: payloads[0].tipoCartao,
+    } : {};
+    const records = await this.readMappings(tenant, token, filters, options);
     const groups = new Map();
+    const baseline = wanted.values().next().value;
     for (const record of records) {
-      const key = Number(record.subFinalizadoraKey);
-      if (!wanted.has(key)) continue;
-      const group = groups.get(key) ?? [];
-      group.push(record);
-      groups.set(key, group);
+      const normalized = normalizeMapping(record);
+      // Compare only trustworthy origin fields first. An invalid destination in an
+      // unrelated map must not block this import. Missing/invalid origin fields
+      // remain unknown: block potentially matching rows instead of assuming absence.
+      const knownFields = ORIGIN_FIELDS.filter(field =>
+        DataValidator.validateSubmissionData({ ...baseline, [field]: normalized[field] }).isValid);
+      const keys = knownFields.length === ORIGIN_FIELDS.length
+        ? [mappingOriginKey(normalized)].filter(key => wanted.has(key))
+        : [...wanted].filter(([, origin]) => knownFields.every(field => normalized[field] === origin[field])).map(([key]) => key);
+      for (const key of keys) {
+        const group = groups.get(key) ?? [];
+        group.push(record);
+        groups.set(key, group);
+      }
     }
     return payloads.map(data => {
       try {
-        const candidates = (groups.get(data.subFinalizadoraKey) ?? []).map(record => ({ id: mapId(record.mapaSubfinalizadoraTefKey), data: snapshot(record) }));
+        const candidates = (groups.get(mappingOriginKey(data)) ?? []).map(record => {
+          const id = mapId(record.mapaSubfinalizadoraTefKey);
+          try { return { id, data: snapshot(record) }; }
+          catch { throw new Error(`O mapa ${id} tem dados ou origem incompletos/inválidos e pode corresponder à linha importada. Revise no ERP antes de enviar.`); }
+        });
         return { data, plan: this.buildPlan(data, candidates) };
-      } catch (error) { return { data, error: error.message }; }
+      } catch (error) { return { data, error: error.message, candidates: error.candidates }; }
     });
   }
 
   async plan(tenant, token, data) {
     const [entry] = await this.planBatch(tenant, token, [data]);
-    if (entry.error) throw new Error(entry.error);
+    if (entry.error) {
+      if (entry.candidates) throw new MappingConflictError(entry.candidates);
+      throw new Error(entry.error);
+    }
     return entry.plan;
   }
 

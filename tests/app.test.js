@@ -53,14 +53,14 @@ function responses(values, callback = () => {}) {
 }
 
 test('análise exibe diferenças; somente a confirmação dispara PUT', async () => {
-  const old = { ...existing, codigoAdministradora: '099' };
+  const old = { ...existing, subFinalizadoraKey: 99 };
   const calls = responses([page([old]), page([old]), new Response(null, { status: 204 })]);
   await app.analyzeImport([data], 'Manual');
   assert.deepEqual(calls, ['GET']);
   assert.equal(controls.confirmReviewBtn.disabled, false);
   assert.match(controls.reviewBody.textContent, /Atualizar/);
   assert.match(controls.reviewBody.textContent, /77/);
-  assert.match(controls.reviewBody.textContent, /099 → 108/);
+  assert.match(controls.reviewBody.textContent, /99 → 5026/);
   await app.confirmReview();
   assert.deepEqual(calls, ['GET', 'GET', 'PUT']);
   assert.match(controls.reviewSummary.textContent, /1 sucesso/);
@@ -118,8 +118,8 @@ test('envio atualiza as linhas no mesmo painel e mantém resultado e relatório 
 });
 
 test('lote compartilha consultas e mostra todas as subfinalizadoras afetadas', async () => {
-  const other = { ...data, subFinalizadoraKey: 999 };
-  const old = { ...existing, codigoAdministradora: '099' };
+  const other = { ...data, codigoBandeira: 99, subFinalizadoraKey: 999 };
+  const old = { ...existing, subFinalizadoraKey: 99 };
   const calls = responses([page([old]), page([old]), new Response(null, { status: 204 }), new Response(null, { status: 201 })]);
   await app.analyzeImport([data, other], 'Arquivo');
   assert.deepEqual(calls, ['GET']);
@@ -127,7 +127,7 @@ test('lote compartilha consultas e mostra todas as subfinalizadoras afetadas', a
   assert.equal(controls.reviewBody.children.length, 2);
   assert.match(controls.reviewBody.textContent, /5026Atualizar/);
   assert.match(controls.reviewBody.textContent, /999Criar/);
-  assert.match(controls.reviewBody.textContent, /099 → 108/);
+  assert.match(controls.reviewBody.textContent, /99 → 5026/);
   await app.confirmReview();
   assert.deepEqual(calls, ['GET', 'GET', 'PUT', 'POST']);
   assert.equal(app.state.processingResults.length, 2);
@@ -155,16 +155,16 @@ test('análise idêntica informa preservação e não grava', async () => {
 
 test('erro de consulta bloqueia o lote inteiro', async () => {
   const calls = responses([Response.json({ detail: 'Sem permissão de consulta' }, { status: 403 })]);
-  await app.analyzeImport([data, { ...data, subFinalizadoraKey: 999 }], 'Arquivo');
+  await app.analyzeImport([data, { ...data, codigoBandeira: 99, subFinalizadoraKey: 999 }], 'Arquivo');
   assert.equal(controls.confirmReviewBtn.disabled, true);
   assert.match(controls.reviewBody.textContent, /Sem permissão/);
   await app.confirmReview();
   assert.deepEqual(calls, ['GET']);
 });
 
-test('subfinalizadoras repetidas no lote são bloqueadas antes da consulta', async () => {
+test('combinações de origem repetidas são bloqueadas mesmo com destinos diferentes', async () => {
   const calls = responses([]);
-  await app.analyzeImport([data, { ...data, codigoBandeira: 99 }], 'Arquivo');
+  await app.analyzeImport([data, { ...data, subFinalizadoraKey: 999 }], 'Arquivo');
   assert.deepEqual(calls, []);
   assert.equal(app.review, null);
   assert.match(controls.reviewSummary.textContent, /repetidas/);
@@ -201,7 +201,7 @@ test('duplo clique não duplica gravações e controles permanecem bloqueados', 
 });
 
 test('cancelamento preserva resultado atual e impede os próximos itens', async () => {
-  const second = { ...data, subFinalizadoraKey: 999 };
+  const second = { ...data, codigoBandeira: 99, subFinalizadoraKey: 999 };
   const calls = responses([page([]), page([]), new Response(null, { status: 201 })], options => {
     if (options.method === 'POST') controls.discardReviewBtn.click();
   });
@@ -310,4 +310,88 @@ test('arquivo com todas as linhas inválidas mantém os erros visíveis', async 
   assert.equal(controls.filePreview.classList.contains('hidden'), false);
   assert.equal(controls.processFileBtn.disabled, true);
   assert.match(controls.previewBody.textContent, /Erro/);
+});
+
+test('conflito mostra os IDs e destinos dos candidatos e mantém envio bloqueado', async () => {
+  const calls = responses([page([existing, { ...existing, mapaSubfinalizadoraTefKey: 78, subFinalizadoraKey: 601 }])]);
+  await app.analyzeImport([data], 'Arquivo');
+  const row = controls.reviewBody.firstElementChild;
+  assert.equal(row.children[2].textContent, '77, 78');
+  assert.match(row.textContent, /Mapa 77/);
+  assert.match(row.textContent, /Mapa 78/);
+  assert.match(row.textContent, /601 → 5026/);
+  assert.match(row.textContent, /dados idênticos/);
+  assert.equal(controls.confirmReviewBtn.disabled, true);
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET']);
+});
+
+test('mesmo destino e origens diferentes mantêm duas linhas de resultado e histórico', async () => {
+  const other = { ...data, codigoAdministradora: '099' };
+  const calls = responses([page([]), page([]), new Response(null, { status: 201 }), new Response(null, { status: 201 })]);
+  await app.analyzeImport([data, other], 'Arquivo');
+  assert.equal(controls.confirmReviewBtn.disabled, false);
+  assert.equal(controls.reviewBody.children.length, 2);
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET', 'GET', 'POST', 'POST']);
+  assert.equal(controls.resultsBody.children.length, 2);
+  assert.ok([...controls.resultsBody.children].every(row => row.dataset.status === 'success'));
+  assert.equal(app.state.processingResults.length, 2);
+  assert.equal(app.state.history.length, 2);
+});
+
+test('cancelamento mantém separados os resultados de duas origens para o mesmo destino', async () => {
+  const other = { ...data, codigoAdministradora: '099' };
+  const calls = responses([page([]), page([]), new Response(null, { status: 201 })], options => {
+    if (options.method === 'POST') controls.discardReviewBtn.click();
+  });
+  await app.analyzeImport([data, other], 'Arquivo');
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET', 'GET', 'POST']);
+  assert.deepEqual([...controls.resultsBody.children].map(row => row.dataset.status), ['success', 'cancelled']);
+  assert.equal(app.state.processingResults.length, 2);
+});
+
+test('origens de um mesmo destino ficam identificadas na tela e no CSV', async () => {
+  const other = { ...data, codigoAdministradora: '=1' };
+  responses([page([]), page([]), new Response(null, { status: 201 }), new Response(null, { status: 201 })]);
+  await app.analyzeImport([data, other], 'Arquivo');
+  await app.confirmReview();
+  assert.match(controls.resultsBody.children[0].textContent, /Administradora 108/);
+  assert.match(controls.resultsBody.children[1].textContent, /Administradora =1/);
+  const csv = app.generateReportCSV();
+  assert.match(csv, /Tipo TEF,Administradora,Bandeira,Tipo cartão/);
+  assert.match(csv, /"SITEF","108","12","CARTAO_CREDITO"/);
+  assert.match(csv, /"SITEF","'=1","12","CARTAO_CREDITO"/);
+});
+
+test('revisão identifica as duas origens antes de confirmar atualizações para o mesmo destino', async () => {
+  const other = { ...data, codigoAdministradora: '099' };
+  const calls = responses([page([
+    { ...existing, subFinalizadoraKey: 601 },
+    { ...other, subFinalizadoraKey: 601, mapaSubfinalizadoraTefKey: 78 },
+  ])]);
+  await app.analyzeImport([data, other], 'Arquivo');
+  const [first, second] = [...controls.reviewBody.children];
+  assert.match(first.textContent, /108/);
+  assert.match(second.textContent, /099/);
+  for (const row of [first, second]) {
+    assert.match(row.textContent, /SITEF/);
+    assert.match(row.textContent, /12/);
+    assert.match(row.textContent, /CARTAO_CREDITO/);
+    assert.match(row.textContent, /601 → 5026/);
+  }
+  assert.equal(first.children[2].textContent, '77');
+  assert.equal(second.children[2].textContent, '78');
+  assert.equal(controls.confirmReviewBtn.disabled, false);
+  assert.deepEqual(calls, ['GET']);
+});
+
+test('origem relevante inválida é exibida como bloqueio e impede qualquer escrita do lote', async () => {
+  const calls = responses([page([{ ...existing, subFinalizadoraKey: null }])]);
+  await app.analyzeImport([data, { ...data, codigoBandeira: 13 }], 'Arquivo');
+  assert.match(controls.reviewBody.textContent, /mapa 77/);
+  assert.equal(controls.confirmReviewBtn.disabled, true);
+  await app.confirmReview();
+  assert.deepEqual(calls, ['GET']);
 });
